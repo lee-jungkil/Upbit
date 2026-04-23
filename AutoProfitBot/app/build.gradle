@@ -30,7 +30,6 @@ android {
         }
         debug {
             debuggable true
-            applicationIdSuffix ".debug"
         }
     }
 
@@ -55,7 +54,18 @@ android {
     packaging {
         resources {
             excludes += '/META-INF/{AL2.0,LGPL2.1}'
+            excludes += '/META-INF/LICENSE.md'
+            excludes += '/META-INF/LICENSE-notice.md'
         }
+    }
+}
+
+configurations.all {
+    resolutionStrategy {
+        force 'androidx.datastore:datastore-preferences:1.1.1'
+        force 'androidx.datastore:datastore-preferences-core:1.1.1'
+        force 'androidx.datastore:datastore:1.1.1'
+        force 'androidx.datastore:datastore-core:1.1.1'
     }
 }
 
@@ -66,7 +76,7 @@ dependencies {
     implementation 'androidx.activity:activity-compose:1.8.2'
     implementation 'androidx.appcompat:appcompat:1.6.1'
 
-    // Jetpack Compose
+    // Jetpack Compose BOM
     implementation platform('androidx.compose:compose-bom:2024.02.00')
     implementation 'androidx.compose.ui:ui'
     implementation 'androidx.compose.ui:ui-graphics'
@@ -104,16 +114,16 @@ dependencies {
     implementation "androidx.room:room-ktx:2.6.1"
     kapt "androidx.room:room-compiler:2.6.1"
 
-    // WorkManager (백그라운드 작업)
+    // WorkManager
     implementation "androidx.work:work-runtime-ktx:2.9.0"
 
-    // DataStore (설정 저장)
-    implementation "androidx.datastore:datastore-preferences:1.0.0"
+    // DataStore (버전 통일)
+    implementation "androidx.datastore:datastore-preferences:1.1.1"
 
     // Gson
     implementation 'com.google.code.gson:gson:2.10.1'
 
-    // Apache Commons Codec (HMAC-SHA512 서명)
+    // Apache Commons Codec (HMAC-SHA512)
     implementation 'commons-codec:commons-codec:1.16.0'
 
     // JWT (Upbit 인증)
@@ -121,7 +131,7 @@ dependencies {
     runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.12.3'
     runtimeOnly 'io.jsonwebtoken:jjwt-gson:0.12.3'
 
-    // Charts (수익 그래프)
+    // Charts
     implementation 'com.patrykandpatrick.vico:compose-m3:1.14.0'
 
     // Lottie 애니메이션
