@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 로봇 몸체 -->
+    <path
+        android:fillColor="#2196F3"
+        android:pathData="M34,45 C34,36.716 40.716,30 49,30 L59,30 C67.284,30 74,36.716 74,45 L74,75 C74,78.314 71.314,81 68,81 L40,81 C36.686,81 34,78.314 34,75 Z"/>
+    <!-- 눈 -->
+    <circle android:fillColor="#FFFFFF" android:cx="45" android:cy="52" android:r="5"/>
+    <circle android:fillColor="#FFFFFF" android:cx="63" android:cy="52" android:r="5"/>
+    <circle android:fillColor="#0D0D2E" android:cx="46" android:cy="53" android:r="2.5"/>
+    <circle android:fillColor="#0D0D2E" android:cx="64" android:cy="53" android:r="2.5"/>
+    <!-- 입 -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M44,66 Q54,72 64,66"/>
+    <!-- 안테나 -->
+    <path
+        android:strokeColor="#FFD700"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M54,30 L54,20"/>
+    <circle android:fillColor="#FFD700" android:cx="54" android:cy="18" android:r="4"/>
+    <!-- 차트 업 화살표 (이마) -->
+    <path
+        android:fillColor="#00C853"
+        android:pathData="M46,38 L54,30 L62,38 L58,38 L58,42 L50,42 L50,38 Z"/>
+</vector>

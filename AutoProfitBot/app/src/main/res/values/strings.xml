@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AutoProfitBot</string>
+    <string name="notification_channel_trading">자동매매 실행 중</string>
+    <string name="notification_channel_buy">매수 알림</string>
+    <string name="notification_channel_sell">매도 알림</string>
+    <string name="notification_channel_summary">손익 요약</string>
+    <string name="notification_channel_warning">경고 알림</string>
+    <string name="btn_start">봇 시작</string>
+    <string name="btn_stop">봇 중지</string>
+    <string name="btn_pause">일시정지</string>
+</resources>

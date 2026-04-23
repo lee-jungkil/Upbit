@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#0D0D2E"
+        android:pathData="M0,0 L108,0 L108,108 L0,108 Z"/>
+    <path
+        android:fillColor="#1A1A4E"
+        android:pathData="M0,0 Q54,20 108,0 L108,108 Q54,88 0,108 Z"/>
+    <!-- 차트 라인 배경 -->
+    <path
+        android:strokeColor="#2196F330"
+        android:strokeWidth="2"
+        android:pathData="M0,70 L20,60 L40,75 L60,45 L80,55 L108,30"/>
+    <path
+        android:strokeColor="#00C85330"
+        android:strokeWidth="1.5"
+        android:pathData="M0,80 L25,65 L50,78 L75,50 L108,40"/>
+</vector>
