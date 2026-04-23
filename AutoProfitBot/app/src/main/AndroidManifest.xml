@@ -59,22 +59,6 @@
             </intent-filter>
         </receiver>
 
-        <!-- WorkManager 초기화 -->
-        <provider
-            android:name="androidx.startup.InitializationProvider"
-            android:authorities="${applicationId}.androidx-startup"
-            android:exported="false"
-            tools:node="merge">
-            <meta-data
-                android:name="androidx.work.WorkManagerInitializer"
-                android:value="androidx.startup" />
-        </provider>
-
-        <!-- 알림 채널 메타데이터 -->
-        <meta-data
-            android:name="com.google.firebase.messaging.default_notification_channel_id"
-            android:value="trading_alerts" />
-
     </application>
 
 </manifest>
