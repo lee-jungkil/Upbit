@@ -60,12 +60,13 @@ android {
     }
 }
 
+// 모든 의존성 버전 강제 통일 (충돌 방지)
 configurations.all {
-    resolutionStrategy {
-        force 'androidx.datastore:datastore-preferences:1.1.1'
-        force 'androidx.datastore:datastore-preferences-core:1.1.1'
-        force 'androidx.datastore:datastore:1.1.1'
-        force 'androidx.datastore:datastore-core:1.1.1'
+    resolutionStrategy.eachDependency { DependencyResolveDetails details ->
+        if (details.requested.group == 'androidx.datastore') {
+            details.useVersion '1.1.1'
+            details.because 'datastore 버전 충돌 방지'
+        }
     }
 }
 
@@ -99,7 +100,7 @@ dependencies {
     implementation 'androidx.hilt:hilt-work:1.1.0'
     kapt 'androidx.hilt:hilt-compiler:1.1.0'
 
-    // Retrofit + OkHttp (Upbit API)
+    // Retrofit + OkHttp
     implementation "com.squareup.retrofit2:retrofit:2.9.0"
     implementation "com.squareup.retrofit2:converter-gson:2.9.0"
     implementation "com.squareup.okhttp3:okhttp:4.12.0"
@@ -114,19 +115,20 @@ dependencies {
     implementation "androidx.room:room-ktx:2.6.1"
     kapt "androidx.room:room-compiler:2.6.1"
 
-    // WorkManager
+    // WorkManager (2.9.0 → datastore 1.1.x 요구)
     implementation "androidx.work:work-runtime-ktx:2.9.0"
 
-    // DataStore (버전 통일)
+    // DataStore (WorkManager 2.9.0 과 호환되는 버전)
     implementation "androidx.datastore:datastore-preferences:1.1.1"
+    implementation "androidx.datastore:datastore-preferences-core:1.1.1"
 
     // Gson
     implementation 'com.google.code.gson:gson:2.10.1'
 
-    // Apache Commons Codec (HMAC-SHA512)
+    // Apache Commons Codec
     implementation 'commons-codec:commons-codec:1.16.0'
 
-    // JWT (Upbit 인증)
+    // JWT
     implementation 'io.jsonwebtoken:jjwt-api:0.12.3'
     runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.12.3'
     runtimeOnly 'io.jsonwebtoken:jjwt-gson:0.12.3'
@@ -134,10 +136,10 @@ dependencies {
     // Charts
     implementation 'com.patrykandpatrick.vico:compose-m3:1.14.0'
 
-    // Lottie 애니메이션
+    // Lottie
     implementation "com.airbnb.android:lottie-compose:6.3.0"
 
-    // Timber 로깅
+    // Timber
     implementation 'com.jakewharton.timber:timber:5.0.1'
 
     // Testing
