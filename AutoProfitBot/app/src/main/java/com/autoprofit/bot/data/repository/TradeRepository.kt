@@ -14,7 +14,6 @@ class TradeRepository @Inject constructor(
     private val positionDao: PositionDao
 ) {
 
-    // ── 거래 기록 ──────────────────────────────────────
     fun getAllTradesFlow(): Flow<List<TradeRecord>> =
         tradeRecordDao.getAllFlow().map { list -> list.map { it.toDomain() } }
 
@@ -36,11 +35,9 @@ class TradeRepository @Inject constructor(
     }
 
     suspend fun todayBuyCount(): Int {
-        val midnight = todayMidnightMs()
-        return tradeRecordDao.buyCountSince(midnight)
+        return tradeRecordDao.buyCountSince(todayMidnightMs())
     }
 
-    // ── 포지션 ──────────────────────────────────────────
     fun getAllPositionsFlow(): Flow<List<Position>> =
         positionDao.getAllFlow().map { list -> list.map { it.toDomain() } }
 
@@ -51,15 +48,14 @@ class TradeRepository @Inject constructor(
         positionDao.insert(position.toEntity())
     }
 
-    suspend fun deletePosition(market: String) {
-        positionDao.delete(market)
+    suspend fun deletePosition(ticker: String) {
+        positionDao.delete(ticker)
     }
 
     suspend fun clearAllPositions() {
         positionDao.deleteAll()
     }
 
-    // ── 헬퍼 ────────────────────────────────────────────
     private fun todayMidnightMs(): Long {
         val cal = java.util.Calendar.getInstance()
         cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
@@ -70,49 +66,59 @@ class TradeRepository @Inject constructor(
     }
 }
 
-// ── 확장 함수 (Entity ↔ Domain) ─────────────────────────
+// ── Entity ↔ Domain 변환 ──────────────────────────────
 private fun TradeRecordEntity.toDomain() = TradeRecord(
-    id        = id,
-    market    = market,
-    side      = side,
-    price     = price,
-    volume    = volume,
-    totalKrw  = totalKrw,
-    profitKrw = profitKrw,
-    profitPct = profitPct,
-    reason    = reason,
-    strategy  = strategy,
-    timestamp = timestamp
+    id            = id,
+    ticker        = ticker,
+    action        = action,
+    strategy      = strategy,
+    price         = price,
+    amount        = amount,
+    investmentKrw = investmentKrw,
+    profitLossKrw = profitLossKrw,
+    profitLossPct = profitLossPct,
+    reason        = reason,
+    timestampMs   = timestampMs
 )
 
 private fun TradeRecord.toEntity() = TradeRecordEntity(
-    id        = id,
-    market    = market,
-    side      = side,
-    price     = price,
-    volume    = volume,
-    totalKrw  = totalKrw,
-    profitKrw = profitKrw,
-    profitPct = profitPct,
-    reason    = reason,
-    strategy  = strategy,
-    timestamp = timestamp
+    id            = id,
+    ticker        = ticker,
+    action        = action,
+    strategy      = strategy,
+    price         = price,
+    amount        = amount,
+    investmentKrw = investmentKrw,
+    profitLossKrw = profitLossKrw,
+    profitLossPct = profitLossPct,
+    reason        = reason,
+    timestampMs   = timestampMs
 )
 
 private fun PositionEntity.toDomain() = Position(
-    market       = market,
-    buyPrice     = buyPrice,
-    volume       = volume,
-    totalKrw     = totalKrw,
-    strategy     = strategy,
-    buyTimestamp = buyTimestamp
+    ticker             = ticker,
+    strategy           = strategy,
+    avgBuyPrice        = avgBuyPrice,
+    currentPrice       = currentPrice,
+    amount             = amount,
+    investmentKrw      = investmentKrw,
+    entryTimeMs        = entryTimeMs,
+    stopLossPrice      = stopLossPrice,
+    takeProfitPrice    = takeProfitPrice,
+    trailingStopPrice  = trailingStopPrice,
+    orderUuid          = orderUuid
 )
 
 private fun Position.toEntity() = PositionEntity(
-    market       = market,
-    buyPrice     = buyPrice,
-    volume       = volume,
-    totalKrw     = totalKrw,
-    strategy     = strategy,
-    buyTimestamp = buyTimestamp
+    ticker             = ticker,
+    strategy           = strategy,
+    avgBuyPrice        = avgBuyPrice,
+    currentPrice       = currentPrice,
+    amount             = amount,
+    investmentKrw      = investmentKrw,
+    entryTimeMs        = entryTimeMs,
+    stopLossPrice      = stopLossPrice,
+    takeProfitPrice    = takeProfitPrice,
+    trailingStopPrice  = trailingStopPrice,
+    orderUuid          = orderUuid
 )

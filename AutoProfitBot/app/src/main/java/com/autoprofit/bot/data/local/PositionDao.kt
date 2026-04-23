@@ -15,8 +15,8 @@ interface PositionDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(position: PositionEntity)
 
-    @Query("DELETE FROM positions WHERE market = :market")
-    suspend fun delete(market: String)
+    @Query("DELETE FROM positions WHERE ticker = :ticker")
+    suspend fun delete(ticker: String)
 
     @Query("DELETE FROM positions")
     suspend fun deleteAll()

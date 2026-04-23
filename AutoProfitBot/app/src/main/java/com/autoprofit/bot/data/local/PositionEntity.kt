@@ -6,10 +6,15 @@ import androidx.room.PrimaryKey
 @Entity(tableName = "positions")
 data class PositionEntity(
     @PrimaryKey
-    val market: String,
-    val buyPrice: Double,
-    val volume: Double,
-    val totalKrw: Double,
+    val ticker: String,
     val strategy: String,
-    val buyTimestamp: Long = System.currentTimeMillis()
+    val avgBuyPrice: Double,
+    val currentPrice: Double,
+    val amount: Double,
+    val investmentKrw: Double,
+    val entryTimeMs: Long = System.currentTimeMillis(),
+    val stopLossPrice: Double = 0.0,
+    val takeProfitPrice: Double = 0.0,
+    val trailingStopPrice: Double = 0.0,
+    val orderUuid: String = ""
 )
