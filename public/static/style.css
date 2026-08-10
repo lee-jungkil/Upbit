@@ -1,1 +1,111 @@
-h1 { font-family: Arial, Helvetica, sans-serif; }
+/* StockBot - Custom Styles */
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+/* 통계 카드 hover */
+.stat-card {
+  transition: border-color 0.2s, transform 0.15s;
+}
+.stat-card:hover {
+  border-color: #3b82f6;
+  transform: translateY(-1px);
+}
+
+/* 모드 버튼 */
+.mode-btn {
+  background: #1f2937;
+  color: #9ca3af;
+  border: 1px solid #374151;
+}
+.mode-btn:hover {
+  background: #374151;
+  color: #e5e7eb;
+}
+.active-mode {
+  background: #1d4ed8 !important;
+  color: #ffffff !important;
+  border-color: #3b82f6 !important;
+}
+.mode-btn.danger {
+  background: #7f1d1d !important;
+  color: #fca5a5 !important;
+  border-color: #dc2626 !important;
+}
+
+/* 로그 라인 */
+.log-info    { color: #86efac; }
+.log-warn    { color: #fde68a; }
+.log-error   { color: #fca5a5; }
+.log-buy     { color: #67e8f9; }
+.log-sell    { color: #f9a8d4; }
+.log-scan    { color: #a5b4fc; }
+.log-profit  { color: #4ade80; }
+.log-loss    { color: #f87171; }
+
+/* 포지션 카드 */
+.position-card {
+  background: #111827;
+  border: 1px solid #1f2937;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  transition: border-color 0.2s;
+}
+.position-card.profit { border-left: 3px solid #22c55e; }
+.position-card.loss   { border-left: 3px solid #ef4444; }
+
+/* 스캐너 카드 */
+.scanner-card {
+  background: #111827;
+  border: 1px solid #1f2937;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.scanner-card:hover {
+  border-color: #3b82f6;
+  background: #1e293b;
+}
+.scanner-card.candidate {
+  border-color: #f59e0b;
+}
+
+/* 범위 슬라이더 */
+input[type=range] {
+  height: 4px;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+/* 스크롤바 */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: #111827; }
+::-webkit-scrollbar-thumb { background: #374151; border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: #4b5563; }
+
+/* 애니메이션 */
+@keyframes pulse-green {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); }
+  50%       { box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); }
+}
+@keyframes pulse-red {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+  50%       { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }
+}
+.running-indicator { animation: pulse-green 2s infinite; }
+.stopped-indicator { animation: none; }
+
+/* 수익/손실 텍스트 */
+.text-profit { color: #22c55e; }
+.text-loss   { color: #ef4444; }
+.text-neutral { color: #9ca3af; }
+
+/* 모달 열기 */
+#api-modal:not(.hidden) { display: flex !important; }
+
+/* 테이블 행 hover */
+#trades-tbody tr:hover td { background: #1f2937; }
