@@ -74,11 +74,27 @@ body {
   border-color: #f59e0b;
 }
 
+/* 숫자 입력 스핀 버튼 숨기기 */
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input[type=number] { -moz-appearance: textfield; }
+
 /* 범위 슬라이더 */
 input[type=range] {
   height: 4px;
   border-radius: 2px;
   cursor: pointer;
+}
+
+/* 총자산 숫자 애니메이션 */
+#stat-total-asset {
+  transition: color 0.3s;
+}
+
+/* 포지션 슬롯 */
+#pos-slots span {
+  display: inline-block;
+  transition: background-color 0.3s;
 }
 
 /* 스크롤바 */

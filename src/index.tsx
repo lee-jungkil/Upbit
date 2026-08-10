@@ -10,9 +10,12 @@ const app = new Hono<{ Bindings: Bindings }>()
 
 app.use('/api/*', cors())
 app.use('/static/*', serveStatic({ root: './public' }))
-app.use('/favicon.svg', serveStatic({ root: './public' }))
 
-// favicon.ico → SVG 리다이렉트
+// favicon 직접 응답 (serveStatic manifest 오류 방지)
+app.get('/favicon.svg', (c) => c.body(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">📈</text></svg>',
+  200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public,max-age=86400' }
+))
 app.get('/favicon.ico', (c) => c.redirect('/favicon.svg', 301))
 
 // ─────────────────────────────────────────────
@@ -314,26 +317,78 @@ app.get('/', (c) => {
 
   <!-- 통계 카드 -->
   <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-    <div class="stat-card bg-gray-900 rounded-xl p-4 border border-gray-800">
-      <div class="text-gray-400 text-xs mb-1">총 자산</div>
-      <div id="stat-total-asset" class="text-xl font-bold text-white">-</div>
-      <div class="text-xs text-gray-500 mt-1">가용 현금 <span id="stat-cash" class="text-blue-400">-</span></div>
+
+    <!-- 총 자산 카드 (실시간 업데이트) -->
+    <div class="stat-card bg-gray-900 rounded-xl p-4 border border-gray-800 relative overflow-hidden">
+      <div class="flex items-center justify-between mb-1">
+        <span class="text-gray-400 text-xs">총 자산</span>
+        <span id="stat-asset-badge" class="text-xs px-1.5 py-0.5 rounded bg-gray-800 text-gray-500">페이퍼</span>
+      </div>
+      <div id="stat-total-asset" class="text-2xl font-bold text-white tracking-tight">-</div>
+      <div class="mt-2 flex items-center justify-between text-xs">
+        <span class="text-gray-500">현금</span>
+        <span id="stat-cash" class="text-blue-400 font-medium">-</span>
+      </div>
+      <div class="mt-1 flex items-center justify-between text-xs">
+        <span class="text-gray-500">주식 평가</span>
+        <span id="stat-stock-value" class="text-yellow-400 font-medium">-</span>
+      </div>
+      <!-- 자산 변동 표시 바 -->
+      <div class="mt-2 h-0.5 bg-gray-800 rounded">
+        <div id="stat-asset-bar" class="h-0.5 rounded bg-blue-500 transition-all duration-500" style="width:100%"></div>
+      </div>
     </div>
+
+    <!-- 오늘 손익 카드 -->
     <div class="stat-card bg-gray-900 rounded-xl p-4 border border-gray-800">
       <div class="text-gray-400 text-xs mb-1">오늘 손익</div>
-      <div id="stat-daily-profit" class="text-xl font-bold text-white">-</div>
-      <div class="text-xs text-gray-500 mt-1">수익률 <span id="stat-daily-rate" class="text-gray-400">-</span></div>
+      <div id="stat-daily-profit" class="text-2xl font-bold text-white">-</div>
+      <div class="mt-2 flex items-center justify-between text-xs">
+        <span class="text-gray-500">수익률</span>
+        <span id="stat-daily-rate" class="text-gray-400 font-medium">-</span>
+      </div>
+      <div class="mt-1 flex items-center justify-between text-xs">
+        <span class="text-gray-500">미실현 손익</span>
+        <span id="stat-unrealized" class="text-gray-400 font-medium">-</span>
+      </div>
     </div>
+
+    <!-- 누적 손익 카드 -->
     <div class="stat-card bg-gray-900 rounded-xl p-4 border border-gray-800">
       <div class="text-gray-400 text-xs mb-1">누적 손익</div>
-      <div id="stat-total-profit" class="text-xl font-bold text-white">-</div>
-      <div class="text-xs text-gray-500 mt-1">승률 <span id="stat-win-rate" class="text-gray-400">-</span></div>
+      <div id="stat-total-profit" class="text-2xl font-bold text-white">-</div>
+      <div class="mt-2 flex items-center justify-between text-xs">
+        <span class="text-gray-500">승률</span>
+        <span id="stat-win-rate" class="text-gray-400 font-medium">-</span>
+      </div>
+      <div class="mt-1 flex items-center justify-between text-xs">
+        <span class="text-gray-500">총 거래</span>
+        <span id="stat-trades" class="text-gray-400 font-medium">0회</span>
+      </div>
     </div>
+
+    <!-- 포지션 카드 -->
     <div class="stat-card bg-gray-900 rounded-xl p-4 border border-gray-800">
-      <div class="text-gray-400 text-xs mb-1">포지션</div>
-      <div id="stat-positions" class="text-xl font-bold text-white">0 / 3</div>
-      <div class="text-xs text-gray-500 mt-1">총 거래 <span id="stat-trades" class="text-gray-400">0회</span></div>
+      <div class="flex items-center justify-between mb-1">
+        <span class="text-gray-400 text-xs">포지션</span>
+        <!-- 최대 포지션 수 직접 입력 -->
+        <div class="flex items-center gap-1">
+          <span class="text-xs text-gray-500">최대</span>
+          <button onclick="changeMaxPos(-1)" class="w-5 h-5 rounded bg-gray-700 hover:bg-gray-600 text-xs flex items-center justify-center leading-none">−</button>
+          <span id="maxpos-display" class="text-xs text-blue-400 font-bold w-4 text-center">3</span>
+          <button onclick="changeMaxPos(+1)" class="w-5 h-5 rounded bg-gray-700 hover:bg-gray-600 text-xs flex items-center justify-center leading-none">+</button>
+        </div>
+      </div>
+      <!-- 포지션 슬롯 시각화 -->
+      <div id="pos-slots" class="flex gap-1 flex-wrap mb-2">
+      </div>
+      <div id="stat-positions" class="text-2xl font-bold text-white">0 / 3</div>
+      <div class="mt-1 flex items-center justify-between text-xs">
+        <span class="text-gray-500">가용 슬롯</span>
+        <span id="stat-slots-left" class="text-green-400 font-medium">3개 여유</span>
+      </div>
     </div>
+
   </div>
 
   <!-- 봇 컨트롤 + 전략 설정 -->
@@ -392,45 +447,76 @@ app.get('/', (c) => {
       </h2>
 
       <div class="space-y-3">
+        <!-- 익절 목표 -->
         <div>
           <label class="text-xs text-gray-400 flex justify-between mb-1">
             <span>익절 목표 (%)</span><span id="profit-val" class="text-green-400">1.5%</span>
           </label>
-          <input type="range" id="profit-target" min="0.5" max="5" step="0.1" value="1.5"
-            oninput="updateSlider('profit-target','profit-val','%')"
-            class="w-full accent-green-500">
+          <div class="flex items-center gap-2">
+            <input type="range" id="profit-target" min="0.5" max="5" step="0.1" value="1.5"
+              oninput="updateSlider('profit-target','profit-val','%'); renderStrategyConditions()"
+              class="flex-1 accent-green-500">
+            <input type="number" id="profit-target-num" min="0.5" max="5" step="0.1" value="1.5"
+              oninput="syncSliderFromNum('profit-target','profit-target-num','profit-val','%'); renderStrategyConditions()"
+              class="w-14 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-xs text-green-400 text-center focus:outline-none focus:border-green-500">
+          </div>
         </div>
+        <!-- 손절 기준 -->
         <div>
           <label class="text-xs text-gray-400 flex justify-between mb-1">
             <span>손절 기준 (%)</span><span id="stoploss-val" class="text-red-400">1.0%</span>
           </label>
-          <input type="range" id="stop-loss" min="0.3" max="3" step="0.1" value="1.0"
-            oninput="updateSlider('stop-loss','stoploss-val','%')"
-            class="w-full accent-red-500">
+          <div class="flex items-center gap-2">
+            <input type="range" id="stop-loss" min="0.3" max="3" step="0.1" value="1.0"
+              oninput="updateSlider('stop-loss','stoploss-val','%'); renderStrategyConditions()"
+              class="flex-1 accent-red-500">
+            <input type="number" id="stop-loss-num" min="0.3" max="3" step="0.1" value="1.0"
+              oninput="syncSliderFromNum('stop-loss','stop-loss-num','stoploss-val','%'); renderStrategyConditions()"
+              class="w-14 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-xs text-red-400 text-center focus:outline-none focus:border-red-500">
+          </div>
         </div>
+        <!-- 최대 포지션 수 (슬라이더 + 숫자 직접 입력) -->
         <div>
           <label class="text-xs text-gray-400 flex justify-between mb-1">
             <span>최대 포지션 수</span><span id="maxpos-val" class="text-blue-400">3개</span>
           </label>
-          <input type="range" id="max-positions" min="1" max="10" step="1" value="3"
-            oninput="updateSlider('max-positions','maxpos-val','개')"
-            class="w-full accent-blue-500">
+          <div class="flex items-center gap-2">
+            <input type="range" id="max-positions" min="1" max="20" step="1" value="3"
+              oninput="updateSlider('max-positions','maxpos-val','개'); syncMaxPosCard()"
+              class="flex-1 accent-blue-500">
+            <input type="number" id="max-positions-num" min="1" max="20" step="1" value="3"
+              oninput="syncSliderFromNum('max-positions','max-positions-num','maxpos-val','개'); syncMaxPosCard()"
+              class="w-14 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-xs text-blue-400 text-center focus:outline-none focus:border-blue-500">
+          </div>
         </div>
+        <!-- 포지션 비율 -->
         <div>
           <label class="text-xs text-gray-400 flex justify-between mb-1">
             <span>포지션 비율 (%)</span><span id="posratio-val" class="text-yellow-400">30%</span>
           </label>
-          <input type="range" id="pos-ratio" min="5" max="50" step="5" value="30"
-            oninput="updateSlider('pos-ratio','posratio-val','%')"
-            class="w-full accent-yellow-500">
+          <div class="flex items-center gap-2">
+            <input type="range" id="pos-ratio" min="5" max="50" step="5" value="30"
+              oninput="updateSlider('pos-ratio','posratio-val','%')"
+              class="flex-1 accent-yellow-500">
+            <input type="number" id="pos-ratio-num" min="5" max="50" step="5" value="30"
+              oninput="syncSliderFromNum('pos-ratio','pos-ratio-num','posratio-val','%')"
+              class="w-14 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-xs text-yellow-400 text-center focus:outline-none focus:border-yellow-500">
+          </div>
         </div>
+        <!-- 페이퍼 초기 자금 -->
         <div>
           <label class="text-xs text-gray-400 flex justify-between mb-1">
             <span>페이퍼 초기 자금</span><span id="paper-capital-val" class="text-gray-300">500만원</span>
           </label>
-          <input type="range" id="paper-capital" min="1" max="50" step="1" value="5"
-            oninput="updateCapitalSlider()"
-            class="w-full accent-gray-400">
+          <div class="flex items-center gap-2">
+            <input type="range" id="paper-capital" min="1" max="50" step="1" value="5"
+              oninput="updateCapitalSlider()"
+              class="flex-1 accent-gray-400">
+            <input type="number" id="paper-capital-num" min="1" max="50" step="1" value="5"
+              oninput="syncCapitalFromNum()"
+              class="w-14 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-xs text-gray-300 text-center focus:outline-none focus:border-gray-500">
+            <span class="text-xs text-gray-500">00만</span>
+          </div>
         </div>
       </div>
 

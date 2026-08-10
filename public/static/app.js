@@ -56,11 +56,14 @@ window.addEventListener('DOMContentLoaded', async () => {
   await loadTradeHistory();
   initProfitChart();
   updateStatsUI();
+  renderPosSlots();
   addLog('info', '📈 StockBot 초기화 완료. API 키를 설정하세요.');
 
-  // 주기적 UI 갱신 (포지션 수익률 업데이트)
+  // 주기적 UI 갱신: 포지션 가격 + 총자산 카드
   setInterval(tickPositions, 5000);
   setInterval(updateMarketStatus, 60000);
+  // 총자산 숫자 애니메이션용 1초 갱신
+  setInterval(updateStatsUI, 1000);
 });
 
 // ─── API 설정 모달 ────────────────────────────────────────────
@@ -135,7 +138,60 @@ function updateSlider(id, labelId, suffix) {
 function updateCapitalSlider() {
   const val = parseInt(document.getElementById('paper-capital').value);
   document.getElementById('paper-capital-val').textContent = val + '00만원';
+  document.getElementById('paper-capital-num').value = val;
   STATE.config.paperCapital = val * 1000000;
+}
+
+// 숫자 입력 → 슬라이더 동기화
+function syncSliderFromNum(sliderId, numId, labelId, suffix) {
+  const num = parseFloat(document.getElementById(numId).value);
+  const slider = document.getElementById(sliderId);
+  const min = parseFloat(slider.min), max = parseFloat(slider.max);
+  const clamped = Math.min(Math.max(num, min), max);
+  slider.value = clamped;
+  document.getElementById(labelId).textContent = clamped.toFixed(suffix === '개' ? 0 : 1) + suffix;
+}
+
+function syncCapitalFromNum() {
+  const val = parseInt(document.getElementById('paper-capital-num').value) || 1;
+  document.getElementById('paper-capital').value = val;
+  document.getElementById('paper-capital-val').textContent = val + '00만원';
+  STATE.config.paperCapital = val * 1000000;
+}
+
+// 포지션 카드의 +/- 버튼
+function changeMaxPos(delta) {
+  const cur = STATE.config.maxPositions;
+  const next = Math.min(Math.max(cur + delta, 1), 20);
+  STATE.config.maxPositions = next;
+  document.getElementById('max-positions').value      = next;
+  document.getElementById('max-positions-num').value  = next;
+  document.getElementById('maxpos-val').textContent   = next + '개';
+  document.getElementById('maxpos-display').textContent = next;
+  renderPosSlots();
+  updateStatsUI();
+}
+
+// 포지션 슬롯 시각화 (카드 상단)
+function renderPosSlots() {
+  const max   = STATE.config.maxPositions;
+  const used  = STATE.positions.length;
+  const slots = document.getElementById('pos-slots');
+  if (!slots) return;
+  slots.innerHTML = Array.from({ length: Math.min(max, 20) }).map((_, i) => {
+    const filled = i < used;
+    return `<span class="w-3 h-3 rounded-sm ${filled ? 'bg-green-500' : 'bg-gray-700'} transition-colors"></span>`;
+  }).join('');
+}
+
+// maxpos 슬라이더 → 카드 동기화
+function syncMaxPosCard() {
+  const val = parseInt(document.getElementById('max-positions').value);
+  document.getElementById('max-positions-num').value    = val;
+  document.getElementById('maxpos-display').textContent = val;
+  STATE.config.maxPositions = val;
+  renderPosSlots();
+  updateStatsUI();
 }
 
 function loadConfig() {
@@ -144,20 +200,33 @@ function loadConfig() {
     try {
       const c = JSON.parse(saved);
       Object.assign(STATE.config, c);
-      document.getElementById('profit-target').value = STATE.config.profitTarget;
-      document.getElementById('stop-loss').value     = STATE.config.stopLoss;
-      document.getElementById('max-positions').value = STATE.config.maxPositions;
-      document.getElementById('pos-ratio').value     = Math.round(STATE.config.positionSizeRatio * 100);
-      document.getElementById('paper-capital').value = Math.round(STATE.config.paperCapital / 1000000);
-      document.getElementById('strategy-select').value = STATE.strategy;
-      // 레이블 갱신
-      document.getElementById('profit-val').textContent   = STATE.config.profitTarget + '%';
-      document.getElementById('stoploss-val').textContent = STATE.config.stopLoss + '%';
-      document.getElementById('maxpos-val').textContent   = STATE.config.maxPositions + '개';
-      document.getElementById('posratio-val').textContent = Math.round(STATE.config.positionSizeRatio * 100) + '%';
-      document.getElementById('paper-capital-val').textContent = Math.round(STATE.config.paperCapital / 1000000) + '00만원';
     } catch(e) {}
   }
+  const p  = STATE.config.profitTarget;
+  const sl = STATE.config.stopLoss;
+  const mp = STATE.config.maxPositions;
+  const pr = Math.round(STATE.config.positionSizeRatio * 100);
+  const pc = Math.round(STATE.config.paperCapital / 1000000);
+
+  document.getElementById('profit-target').value      = p;
+  document.getElementById('profit-target-num').value  = p;
+  document.getElementById('stop-loss').value          = sl;
+  document.getElementById('stop-loss-num').value      = sl;
+  document.getElementById('max-positions').value      = mp;
+  document.getElementById('max-positions-num').value  = mp;
+  document.getElementById('pos-ratio').value          = pr;
+  document.getElementById('pos-ratio-num').value      = pr;
+  document.getElementById('paper-capital').value      = pc;
+  document.getElementById('paper-capital-num').value  = pc;
+  document.getElementById('strategy-select').value    = localStorage.getItem('bot_strategy') || 'scalping';
+
+  // 레이블 갱신
+  document.getElementById('profit-val').textContent        = p + '%';
+  document.getElementById('stoploss-val').textContent      = sl + '%';
+  document.getElementById('maxpos-val').textContent        = mp + '개';
+  document.getElementById('maxpos-display').textContent    = mp;
+  document.getElementById('posratio-val').textContent      = pr + '%';
+  document.getElementById('paper-capital-val').textContent = pc + '00만원';
 }
 
 function saveConfig() {
@@ -168,8 +237,12 @@ function saveConfig() {
   STATE.strategy                 = document.getElementById('strategy-select').value;
   localStorage.setItem('bot_config', JSON.stringify(STATE.config));
   localStorage.setItem('bot_strategy', STATE.strategy);
-  addLog('info', '💾 설정 저장 완료');
+  // 카드 동기화
+  document.getElementById('maxpos-display').textContent = STATE.config.maxPositions;
+  renderPosSlots();
+  addLog('info', `💾 설정 저장 — 최대포지션: ${STATE.config.maxPositions}개, 익절: ${STATE.config.profitTarget}%, 손절: ${STATE.config.stopLoss}%`);
   renderStrategyConditions();
+  updateStatsUI();
 }
 
 // ─── 전략 조건 표시 ───────────────────────────────────────────
@@ -566,6 +639,7 @@ async function executeEntry(candidate) {
   addLog('buy', `💰 매수: ${pos.name} (${pos.ticker})`);
   addLog('buy', `   진입가 ${fmtPrice(pos.entryPrice)}원 | ${qty}주 | 투자 ${fmtPrice(qty * price)}원`);
   renderPositions();
+  updateStatsUI(); // 매수 즉시 총자산 카드 반영
 }
 
 // ─── 실시간 포지션 가격 업데이트 ──────────────────────────────
@@ -580,7 +654,7 @@ async function tickPositions() {
     }
   }
   renderPositions();
-  updateStatsUI();
+  updateStatsUI(); // 포지션 가격 변동 → 총자산 카드 즉시 반영
 }
 
 async function fetchCurrentPrice(ticker) {
@@ -708,27 +782,70 @@ async function clearTrades() {
 function updateStatsUI() {
   const { totalTrades, winTrades, totalProfit, dailyProfit } = STATE.stats;
   const winRate = totalTrades > 0 ? Math.round((winTrades / totalTrades) * 100) : 0;
+  const maxPos  = STATE.config.maxPositions;
+  const curPos  = STATE.positions.length;
 
-  // 총 자산
-  const paperTotal = STATE.mode === 'paper' ? STATE.paperBalance + STATE.positions.reduce((sum, p) => sum + (p.currentPrice * p.qty), 0) : null;
-  document.getElementById('stat-total-asset').textContent = paperTotal ? fmtPrice(paperTotal) + '원' : '-';
-  document.getElementById('stat-cash').textContent        = STATE.mode === 'paper' ? fmtPrice(STATE.paperBalance) + '원' : '잔고 조회 필요';
+  // ── 총 자산 카드 (실시간 반영) ──────────────────────
+  // 보유 주식 현재 평가금
+  const stockVal = STATE.positions.reduce((sum, p) => sum + (p.currentPrice * p.qty), 0);
+  // 미실현 손익 (수수료 차감 전)
+  const unrealizedPnl = STATE.positions.reduce((sum, p) => {
+    const pnl = (p.currentPrice - p.entryPrice) * p.qty;
+    return sum + pnl;
+  }, 0);
 
-  // 일 손익
-  const dailyEl = document.getElementById('stat-daily-profit');
+  if (STATE.mode === 'paper') {
+    const totalAsset = STATE.paperBalance + stockVal;
+    const initialCap = STATE.config.paperCapital;
+    // 총자산 표시
+    document.getElementById('stat-total-asset').textContent = fmtPrice(totalAsset) + '원';
+    // 자산 변동 색상
+    const assetEl = document.getElementById('stat-total-asset');
+    const assetDiff = totalAsset - initialCap;
+    assetEl.className = 'text-2xl font-bold ' + (assetDiff >= 0 ? 'text-white' : 'text-red-300') + ' tracking-tight';
+    // 현금 / 주식평가
+    document.getElementById('stat-cash').textContent        = fmtPrice(STATE.paperBalance) + '원';
+    document.getElementById('stat-stock-value').textContent = stockVal > 0 ? fmtPrice(stockVal) + '원' : '없음';
+    // 배지
+    document.getElementById('stat-asset-badge').textContent = '페이퍼';
+    // 진행 바: 현재자산 / 초기자산 비율
+    const barPct = Math.min((totalAsset / Math.max(initialCap, 1)) * 100, 200);
+    const barEl  = document.getElementById('stat-asset-bar');
+    barEl.style.width      = Math.min(barPct, 100) + '%';
+    barEl.className = 'h-0.5 rounded transition-all duration-500 ' + (assetDiff >= 0 ? 'bg-green-500' : 'bg-red-500');
+  } else {
+    document.getElementById('stat-total-asset').textContent = stockVal > 0 ? '평가 ' + fmtPrice(stockVal) + '원' : '계좌 조회 필요';
+    document.getElementById('stat-cash').textContent        = '잔고 조회 필요';
+    document.getElementById('stat-stock-value').textContent = stockVal > 0 ? fmtPrice(stockVal) + '원' : '-';
+    document.getElementById('stat-asset-badge').textContent = '실전';
+    document.getElementById('stat-asset-badge').className   = 'text-xs px-1.5 py-0.5 rounded bg-red-900/50 text-red-400';
+  }
+
+  // ── 오늘 손익 카드 ──────────────────────────────────
+  const dailyEl   = document.getElementById('stat-daily-profit');
   dailyEl.textContent = (dailyProfit >= 0 ? '+' : '') + fmtPrice(dailyProfit) + '원';
-  dailyEl.className   = 'text-xl font-bold ' + (dailyProfit >= 0 ? 'text-profit' : 'text-loss');
-  const dailyRate     = STATE.config.paperCapital > 0 ? (dailyProfit / STATE.config.paperCapital * 100).toFixed(2) : '0.00';
+  dailyEl.className   = 'text-2xl font-bold ' + (dailyProfit >= 0 ? 'text-profit' : 'text-loss');
+  const dailyRate = STATE.config.paperCapital > 0 ? (dailyProfit / STATE.config.paperCapital * 100).toFixed(2) : '0.00';
   document.getElementById('stat-daily-rate').textContent = (dailyProfit >= 0 ? '+' : '') + dailyRate + '%';
+  // 미실현 손익
+  const unrEl = document.getElementById('stat-unrealized');
+  unrEl.textContent = (unrealizedPnl >= 0 ? '+' : '') + fmtPrice(unrealizedPnl) + '원';
+  unrEl.className   = unrealizedPnl >= 0 ? 'text-green-400 font-medium' : 'text-red-400 font-medium';
 
-  // 누적 손익
+  // ── 누적 손익 카드 ──────────────────────────────────
   const profitEl = document.getElementById('stat-total-profit');
   profitEl.textContent = (totalProfit >= 0 ? '+' : '') + fmtPrice(totalProfit) + '원';
-  profitEl.className   = 'text-xl font-bold ' + (totalProfit >= 0 ? 'text-profit' : 'text-loss');
+  profitEl.className   = 'text-2xl font-bold ' + (totalProfit >= 0 ? 'text-profit' : 'text-loss');
   document.getElementById('stat-win-rate').textContent = winRate + '%';
+  document.getElementById('stat-trades').textContent   = totalTrades + '회';
 
-  // 포지션 / 거래수
-  document.getElementById('stat-trades').textContent = totalTrades + '회';
+  // ── 포지션 카드 ─────────────────────────────────────
+  document.getElementById('stat-positions').textContent = `${curPos} / ${maxPos}`;
+  document.getElementById('stat-slots-left').textContent = `${Math.max(maxPos - curPos, 0)}개 여유`;
+  document.getElementById('stat-slots-left').className   =
+    (maxPos - curPos) > 0 ? 'text-green-400 font-medium' : 'text-red-400 font-medium';
+  document.getElementById('maxpos-display').textContent  = maxPos;
+  renderPosSlots();
 }
 
 // ─── 차트 ─────────────────────────────────────────────────────
