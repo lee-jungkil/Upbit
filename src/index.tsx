@@ -10,6 +10,10 @@ const app = new Hono<{ Bindings: Bindings }>()
 
 app.use('/api/*', cors())
 app.use('/static/*', serveStatic({ root: './public' }))
+app.use('/favicon.svg', serveStatic({ root: './public' }))
+
+// favicon.ico → SVG 리다이렉트
+app.get('/favicon.ico', (c) => c.redirect('/favicon.svg', 301))
 
 // ─────────────────────────────────────────────
 // KIS API 헬퍼
@@ -194,30 +198,43 @@ app.post('/api/trade/order', async (c) => {
   return c.json(data)
 })
 
-// 전략 상태 저장 / 조회 (KV 사용)
+// 인메모리 폴백 스토어 (KV 없을 때)
+const memStore: Record<string, any> = {}
+
+async function kvGet(kv: KVNamespace | undefined, key: string) {
+  if (kv) { try { return await kv.get(key, 'json') } catch { } }
+  return memStore[key] ?? null
+}
+
+async function kvPut(kv: KVNamespace | undefined, key: string, value: any) {
+  if (kv) { try { await kv.put(key, JSON.stringify(value)); return } catch { } }
+  memStore[key] = value
+}
+
+// 전략 상태 저장 / 조회
 app.get('/api/bot/state', async (c) => {
-  const state = await c.env.KV?.get('bot_state', 'json')
+  const state = await kvGet(c.env.KV, 'bot_state')
   return c.json(state || getDefaultState())
 })
 
 app.post('/api/bot/state', async (c) => {
   const body = await c.req.json()
-  await c.env.KV?.put('bot_state', JSON.stringify(body))
+  await kvPut(c.env.KV, 'bot_state', body)
   return c.json({ ok: true })
 })
 
-// 거래 내역 조회 (KV)
+// 거래 내역 조회
 app.get('/api/trades', async (c) => {
-  const trades = await c.env.KV?.get('trade_history', 'json')
+  const trades = await kvGet(c.env.KV, 'trade_history')
   return c.json(trades || [])
 })
 
 app.post('/api/trades', async (c) => {
   const body = await c.req.json()
-  const existing: any[] = (await c.env.KV?.get('trade_history', 'json')) || []
+  const existing: any[] = (await kvGet(c.env.KV, 'trade_history')) || []
   existing.unshift(body)
   const trimmed = existing.slice(0, 500)
-  await c.env.KV?.put('trade_history', JSON.stringify(trimmed))
+  await kvPut(c.env.KV, 'trade_history', trimmed)
   return c.json({ ok: true })
 })
 
@@ -263,6 +280,7 @@ app.get('/', (c) => {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>📈 StockBot - 주식 자동매매</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
