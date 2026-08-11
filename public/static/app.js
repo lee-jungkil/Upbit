@@ -27,6 +27,9 @@ const STATE = {
   countdownTimer: null,
   profitHistory: [],       // [{time, cumProfit}]
   candidates: [],          // 최근 스캔 후보
+  // ── 적응형 진입 조건 ───────────────────────────────────
+  adaptiveMode: 1,         // 0=공격 1=기본 2=방어 3=대기
+  recentResults: [],       // 최근 10회 거래 결과 [{win:bool, pnlPct}]
 };
 
 // API 키 (세션 스토리지)
@@ -60,6 +63,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   initProfitChart();
   updateStatsUI();
   renderPosSlots();
+  updateAdaptiveBadge();
   addLog('info', '📈 StockBot 초기화 완료. API 키를 설정하세요.');
 
   // 주기적 UI 갱신: 포지션 가격 + 총자산 카드
@@ -390,6 +394,126 @@ function saveConfig() {
   updateStatsUI();
 }
 
+// ─── 적응형 진입 조건 파라미터 ────────────────────────────────
+// 4단계: 0=공격(완화) 1=기본(표준) 2=방어(강화) 3=대기(매우강화)
+// 승률 기준: ≥65% → 공격 | 40~64% → 기본 | 25~39% → 방어 | <25% → 대기
+const ADAPTIVE_PARAMS = {
+  scalping: [
+    // 0: 공격 — 승률 ≥ 65%, 조건 완화
+    {
+      label: '🟢 공격', labelShort: '공격',
+      rsiMin: 40, rsiMax: 60,         // RSI 40~60 (20%p)
+      volMult: 1.3,                    // 거래량 1.3배
+      pctMin: 0.2, pctMax: 2.5,       // 가격변동 0.2~2.5%
+      buyPressure: 1.1,
+      scoreBonus: 10,
+      desc: '승률 ≥ 65% — 진입 조건 완화, 공격적 매수',
+    },
+    // 1: 기본 — 승률 40~64%
+    {
+      label: '🔵 기본', labelShort: '기본',
+      rsiMin: 45, rsiMax: 55,         // RSI 45~55 (10%p) ← 핵심 수정
+      volMult: 1.5,
+      pctMin: 0.3, pctMax: 2.0,
+      buyPressure: 1.2,
+      scoreBonus: 0,
+      desc: '승률 40~64% — 표준 진입 조건',
+    },
+    // 2: 방어 — 승률 25~39%
+    {
+      label: '🟡 방어', labelShort: '방어',
+      rsiMin: 47, rsiMax: 53,         // RSI 47~53 (6%p)
+      volMult: 2.0,
+      pctMin: 0.4, pctMax: 1.5,
+      buyPressure: 1.35,
+      scoreBonus: -5,
+      desc: '승률 25~39% — 조건 강화, 고확률 종목만 진입',
+    },
+    // 3: 대기 — 승률 < 25%
+    {
+      label: '🔴 대기', labelShort: '대기',
+      rsiMin: 48, rsiMax: 52,         // RSI 48~52 (4%p) — 가장 엄격
+      volMult: 2.5,
+      pctMin: 0.5, pctMax: 1.0,
+      buyPressure: 1.5,
+      scoreBonus: -15,
+      desc: '승률 < 25% — 진입 최소화, 손실 방어 최우선',
+    },
+  ],
+  volume: [
+    { label: '🟢 공격', labelShort: '공격', volMult: 1.5, pctMin: 0.3, pctMax: 6.0, rsiMax: 75, desc: '승률 ≥ 65%' },
+    { label: '🔵 기본', labelShort: '기본', volMult: 2.0, pctMin: 0.5, pctMax: 5.0, rsiMax: 70, desc: '승률 40~64%' },
+    { label: '🟡 방어', labelShort: '방어', volMult: 2.8, pctMin: 0.7, pctMax: 3.5, rsiMax: 65, desc: '승률 25~39%' },
+    { label: '🔴 대기', labelShort: '대기', volMult: 3.5, pctMin: 1.0, pctMax: 2.5, rsiMax: 60, desc: '승률 < 25%' },
+  ],
+  momentum: [
+    { label: '🟢 공격', labelShort: '공격', volMult: 1.0, pctMin: 0.5, adx: 20, desc: '승률 ≥ 65%' },
+    { label: '🔵 기본', labelShort: '기본', volMult: 1.3, pctMin: 1.0, adx: 25, desc: '승률 40~64%' },
+    { label: '🟡 방어', labelShort: '방어', volMult: 1.6, pctMin: 1.5, adx: 30, desc: '승률 25~39%' },
+    { label: '🔴 대기', labelShort: '대기', volMult: 2.0, pctMin: 2.0, adx: 35, desc: '승률 < 25%' },
+  ],
+  mean_reversion: [
+    { label: '🟢 공격', labelShort: '공격', rsiMax: 35, pctMin: -1.0, desc: '승률 ≥ 65%' },
+    { label: '🔵 기본', labelShort: '기본', rsiMax: 30, pctMin: -1.5, desc: '승률 40~64%' },
+    { label: '🟡 방어', labelShort: '방어', rsiMax: 25, pctMin: -2.0, desc: '승률 25~39%' },
+    { label: '🔴 대기', labelShort: '대기', rsiMax: 20, pctMin: -3.0, desc: '승률 < 25%' },
+  ],
+};
+
+/** 승률 → 적응 단계(0~3) 반환 */
+function calcAdaptiveMode() {
+  const results = STATE.recentResults;          // 최근 거래 결과 배열
+  if (results.length < 3) return;              // 3회 미만이면 갱신 안 함
+  const sample  = results.slice(-10);          // 최근 10회만
+  const wins    = sample.filter(r => r.win).length;
+  const winRate = (wins / sample.length) * 100;
+
+  const prev = STATE.adaptiveMode;
+  if      (winRate >= 65) STATE.adaptiveMode = 0;  // 공격
+  else if (winRate >= 40) STATE.adaptiveMode = 1;  // 기본
+  else if (winRate >= 25) STATE.adaptiveMode = 2;  // 방어
+  else                    STATE.adaptiveMode = 3;  // 대기
+
+  if (STATE.adaptiveMode !== prev) {
+    const ap    = ADAPTIVE_PARAMS.scalping[STATE.adaptiveMode]; // 대표명
+    const names = ['🟢 공격', '🔵 기본', '🟡 방어', '🔴 대기'];
+    addLog('info',
+      `📊 적응 모드 변경: ${names[prev]} → ${names[STATE.adaptiveMode]} ` +
+      `(최근 ${sample.length}회 승률 ${winRate.toFixed(0)}%)`);
+  }
+  updateAdaptiveBadge();
+  renderStrategyConditions();  // 진입 조건 패널도 즉시 갱신
+}
+
+/** 상단 배지 + 포지션 카드 배지 갱신 */
+function updateAdaptiveBadge() {
+  const mode  = STATE.adaptiveMode;
+  const names = ['🟢 공격', '🔵 기본', '🟡 방어', '🔴 대기'];
+  const colors= [
+    'bg-green-900/60 text-green-300 border-green-700',
+    'bg-blue-900/60  text-blue-300  border-blue-700',
+    'bg-yellow-900/60 text-yellow-300 border-yellow-700',
+    'bg-red-900/60   text-red-300   border-red-700',
+  ];
+  const cls = `text-xs px-2 py-0.5 rounded border font-medium ${colors[mode]}`;
+  ['adaptive-badge', 'adaptive-badge-2'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = names[mode];
+    el.className   = cls;
+  });
+
+  // 최근 승률 표시
+  const sample  = STATE.recentResults.slice(-10);
+  const wins    = sample.filter(r => r.win).length;
+  const rateEl  = document.getElementById('adaptive-winrate');
+  if (rateEl) {
+    rateEl.textContent = sample.length > 0
+      ? `최근 ${sample.length}회 승률 ${Math.round(wins/sample.length*100)}%`
+      : '거래 없음';
+  }
+}
+
 // ─── 전략 조건 표시 ───────────────────────────────────────────
 const STRATEGY_META = {
   scalping: {
@@ -449,13 +573,52 @@ function renderStrategyConditions() {
   const profitTarget = parseFloat(document.getElementById('profit-target')?.value || STATE.config.profitTarget);
   const stopLoss     = parseFloat(document.getElementById('stop-loss')?.value     || STATE.config.stopLoss);
 
-  const condEl = document.getElementById('strategy-conditions');
-  condEl.innerHTML = meta.conditions.map(c => `
-    <div class="flex justify-between items-center bg-gray-800/50 rounded px-2 py-1.5">
-      <span class="text-gray-400">${c.label}</span>
-      <span class="${COLOR_MAP[c.color] || 'text-gray-300'} font-medium">${c.value}</span>
-    </div>
-  `).join('');
+  // ── 적응형 파라미터로 진입 조건 표시 ──────────────────────
+  const ap      = (ADAPTIVE_PARAMS[strat] || ADAPTIVE_PARAMS.scalping)[STATE.adaptiveMode];
+  const condEl  = document.getElementById('strategy-conditions');
+  const modeColors = ['text-green-400','text-blue-400','text-yellow-400','text-red-400'];
+  const mc = modeColors[STATE.adaptiveMode];
+
+  // 스캘핑은 RSI 표시, 거래량/모멘텀/평균회귀는 해당 핵심 조건 표시
+  let condRows = '';
+  if (strat === 'scalping') {
+    condRows = `
+      <div class="flex justify-between items-center bg-gray-800/50 rounded px-2 py-1.5">
+        <span class="text-gray-400">RSI 범위</span>
+        <span class="${mc} font-medium">${ap.rsiMin} ~ ${ap.rsiMax} <span class="text-gray-600 text-xs">(${ap.rsiMax-ap.rsiMin}%p)</span></span>
+      </div>
+      <div class="flex justify-between items-center bg-gray-800/50 rounded px-2 py-1.5">
+        <span class="text-gray-400">가격 변동</span>
+        <span class="${mc} font-medium">${ap.pctMin}% ~ ${ap.pctMax}%</span>
+      </div>
+      <div class="flex justify-between items-center bg-gray-800/50 rounded px-2 py-1.5">
+        <span class="text-gray-400">거래량 배수</span>
+        <span class="${mc} font-medium">${ap.volMult}× 이상</span>
+      </div>
+      <div class="flex justify-between items-center bg-gray-800/50 rounded px-2 py-1.5">
+        <span class="text-gray-400">매수 압력</span>
+        <span class="${mc} font-medium">${ap.buyPressure}× 이상</span>
+      </div>`;
+  } else {
+    condRows = meta.conditions.map(c => `
+      <div class="flex justify-between items-center bg-gray-800/50 rounded px-2 py-1.5">
+        <span class="text-gray-400">${c.label}</span>
+        <span class="${COLOR_MAP[c.color]||'text-gray-300'} font-medium">${c.value}</span>
+      </div>`).join('');
+    // 적응형 핵심 조건 추가 표시
+    if (ap.volMult) condRows += `
+      <div class="flex justify-between items-center bg-gray-800/60 rounded px-2 py-1.5 border-l-2 border-l-${modeColors[STATE.adaptiveMode].split('-')[1]}-500">
+        <span class="text-gray-500 text-xs">📊 적응 거래량 기준</span>
+        <span class="${mc} text-xs font-medium">${ap.volMult}× 이상</span>
+      </div>`;
+    if (ap.pctMin !== undefined) condRows += `
+      <div class="flex justify-between items-center bg-gray-800/60 rounded px-2 py-1.5 border-l-2 border-l-${modeColors[STATE.adaptiveMode].split('-')[1]}-500">
+        <span class="text-gray-500 text-xs">📊 적응 가격 기준</span>
+        <span class="${mc} text-xs font-medium">${ap.pctMin > 0 ? '+' : ''}${ap.pctMin}% ~</span>
+      </div>`;
+  }
+
+  condEl.innerHTML = condRows;
 
   const exitEl = document.getElementById('exit-conditions');
   const fee  = 0.245;
@@ -731,6 +894,11 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
     mode:       STATE.mode,
   });
   await loadTradeHistory();
+
+  // ── 거래 결과 누적 → 적응 모드 갱신 ──────────────────────
+  STATE.recentResults.push({ win: isWin, pnlPct: netPnlPct });
+  if (STATE.recentResults.length > 30) STATE.recentResults.shift(); // 최대 30회 보관
+  calcAdaptiveMode(); // 10회 단위 평가
 }
 
 // 신규 진입 스캔
@@ -785,44 +953,58 @@ async function generateCandidates() {
 
 function generateSimCandidates(strategy) {
   const STOCKS = [
-    { ticker: '005930', name: '삼성전자',     basePrice: 78000 },
-    { ticker: '000660', name: 'SK하이닉스',   basePrice: 195000 },
-    { ticker: '035420', name: 'NAVER',        basePrice: 235000 },
-    { ticker: '005380', name: '현대차',       basePrice: 265000 },
-    { ticker: '051910', name: 'LG화학',       basePrice: 380000 },
-    { ticker: '006400', name: '삼성SDI',      basePrice: 370000 },
-    { ticker: '035720', name: '카카오',       basePrice: 48000 },
-    { ticker: '068270', name: '셀트리온',     basePrice: 195000 },
+    { ticker: '005930', name: '삼성전자',        basePrice: 78000 },
+    { ticker: '000660', name: 'SK하이닉스',      basePrice: 195000 },
+    { ticker: '035420', name: 'NAVER',           basePrice: 235000 },
+    { ticker: '005380', name: '현대차',          basePrice: 265000 },
+    { ticker: '051910', name: 'LG화학',          basePrice: 380000 },
+    { ticker: '006400', name: '삼성SDI',         basePrice: 370000 },
+    { ticker: '035720', name: '카카오',          basePrice: 48000 },
+    { ticker: '068270', name: '셀트리온',        basePrice: 195000 },
     { ticker: '207940', name: '삼성바이오로직스', basePrice: 980000 },
-    { ticker: '003670', name: '포스코홀딩스', basePrice: 375000 },
+    { ticker: '003670', name: '포스코홀딩스',    basePrice: 375000 },
   ];
+
+  // 현재 적응 단계 파라미터 가져오기
+  const ap = (ADAPTIVE_PARAMS[strategy] || ADAPTIVE_PARAMS.scalping)[STATE.adaptiveMode];
 
   const results = [];
   const shuffled = [...STOCKS].sort(() => Math.random() - 0.5);
 
   for (const s of shuffled.slice(0, 8)) {
-    const pctChange  = (Math.random() - 0.3) * 4;
-    const volMult    = 1 + Math.random() * 3;
-    const rsi        = 30 + Math.random() * 50;
+    const pctChange   = (Math.random() - 0.3) * 4;
+    const volMult     = 1 + Math.random() * 3;
+    const rsi         = 30 + Math.random() * 50;
     const buyPressure = 0.8 + Math.random() * 0.8;
 
     let pass = false;
-    if (strategy === 'scalping')       pass = pctChange > 0.3 && pctChange < 2.0 && rsi > 35 && rsi < 65 && buyPressure > 1.2;
-    if (strategy === 'volume')         pass = volMult > 2.0 && pctChange > 0.5 && rsi < 70;
-    if (strategy === 'momentum')       pass = pctChange > 1.0 && volMult > 1.3;
-    if (strategy === 'mean_reversion') pass = pctChange < -1.5 && rsi < 35;
+    if (strategy === 'scalping') {
+      // 적응형 RSI/거래량/가격변동/매수압력 조건 적용
+      pass = pctChange > ap.pctMin && pctChange < ap.pctMax
+          && rsi > ap.rsiMin && rsi < ap.rsiMax
+          && volMult >= ap.volMult
+          && buyPressure >= ap.buyPressure;
+    } else if (strategy === 'volume') {
+      pass = volMult >= ap.volMult && pctChange > ap.pctMin && rsi < (ap.rsiMax || 70);
+    } else if (strategy === 'momentum') {
+      pass = pctChange > ap.pctMin && volMult >= ap.volMult;
+    } else if (strategy === 'mean_reversion') {
+      pass = pctChange < ap.pctMin && rsi < (ap.rsiMax || 30);
+    }
 
     if (pass) {
       const price = s.basePrice * (1 + pctChange / 100);
+      // 적응 단계에 따른 score 보정
+      const baseScore = Math.round(50 + Math.random() * 40);
       results.push({
-        ticker:    s.ticker,
-        name:      s.name,
-        price:     Math.round(price),
-        pctChange: parseFloat(pctChange.toFixed(2)),
-        volume:    Math.round(1000000 * volMult),
-        rsi:       parseFloat(rsi.toFixed(1)),
+        ticker:      s.ticker,
+        name:        s.name,
+        price:       Math.round(price),
+        pctChange:   parseFloat(pctChange.toFixed(2)),
+        volume:      Math.round(1000000 * volMult),
+        rsi:         parseFloat(rsi.toFixed(1)),
         buyPressure: parseFloat(buyPressure.toFixed(2)),
-        score:     Math.round(50 + Math.random() * 40),
+        score:       Math.min(100, Math.max(0, baseScore + (ap.scoreBonus || 0))),
       });
     }
   }

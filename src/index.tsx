@@ -437,6 +437,15 @@ app.get('/', (c) => {
         <div class="flex justify-between"><span>상태</span><span id="bot-running-label" class="text-gray-400">정지</span></div>
         <div class="flex justify-between"><span>스캔 주기</span><span id="bot-interval-label" class="text-blue-400">30초</span></div>
         <div class="flex justify-between"><span>다음 스캔</span><span id="next-scan-label" class="text-gray-400">-</span></div>
+        <!-- 적응형 모드 상태 -->
+        <div class="flex justify-between items-center pt-1 border-t border-gray-800/50">
+          <span>진입 모드</span>
+          <span id="adaptive-badge" class="text-xs px-2 py-0.5 rounded border font-medium bg-blue-900/60 text-blue-300 border-blue-700">🔵 기본</span>
+        </div>
+        <div class="flex justify-between">
+          <span>적응 기준</span>
+          <span id="adaptive-winrate" class="text-gray-500">거래 없음</span>
+        </div>
       </div>
     </div>
 
@@ -576,9 +585,12 @@ app.get('/', (c) => {
 
     <!-- 전략 진입 조건 표시 -->
     <div class="bg-gray-900 rounded-xl p-5 border border-gray-800 space-y-3">
-      <h2 class="text-sm font-semibold text-gray-300 flex items-center gap-2">
-        <i class="fas fa-filter text-yellow-400"></i> 현재 진입 조건
-      </h2>
+      <div class="flex items-center justify-between">
+        <h2 class="text-sm font-semibold text-gray-300 flex items-center gap-2">
+          <i class="fas fa-filter text-yellow-400"></i> 현재 진입 조건
+        </h2>
+        <span id="adaptive-badge-2" class="text-xs px-2 py-0.5 rounded border font-medium bg-blue-900/60 text-blue-300 border-blue-700">🔵 기본</span>
+      </div>
       <div id="strategy-conditions" class="space-y-2 text-xs">
         <!-- 동적 렌더링 -->
       </div>
