@@ -458,11 +458,23 @@ function renderStrategyConditions() {
   `).join('');
 
   const exitEl = document.getElementById('exit-conditions');
-  const fee = 0.245;
+  const fee  = 0.245;
+  const ep   = EXIT_PARAMS[strat] || EXIT_PARAMS.scalping;
+  const trailTrigger = (profitTarget * ep.trailTriggerMult).toFixed(2);
+  const trailCut     = (profitTarget * ep.trailTriggerMult + ep.trailDropPct).toFixed(2);
   exitEl.innerHTML = `
-    <div class="flex justify-between"><span class="text-gray-500">✅ 익절</span><span class="text-green-400">+${profitTarget}% (수수료 후 +${(profitTarget - fee).toFixed(2)}%)</span></div>
+    <div class="flex justify-between items-start">
+      <span class="text-gray-500">🔒 트레일 발동</span>
+      <span class="text-orange-400 text-right">+${trailTrigger}% 도달 시<br><span class="text-gray-500 text-xs">(목표 ${profitTarget}% × ${ep.trailTriggerMult}×)</span></span>
+    </div>
+    <div class="flex justify-between items-start">
+      <span class="text-gray-500">↘ 트레일 청산</span>
+      <span class="text-yellow-400 text-right">고점에서 -${ep.trailDropPct}%p 하락<br><span class="text-gray-500 text-xs">예: 고점 +2%→ +${(2-ep.trailDropPct).toFixed(1)}% 이하 시 매도</span></span>
+    </div>
     <div class="flex justify-between"><span class="text-gray-500">🚨 손절</span><span class="text-red-400">-${stopLoss}% (실제 -${(stopLoss + fee).toFixed(2)}%)</span></div>
-    <div class="flex justify-between"><span class="text-gray-500">⏰ 시간 청산</span><span class="text-yellow-400">전략별 최대 보유 시간</span></div>
+    <div class="flex justify-between"><span class="text-gray-500">💸 슬리피지</span><span class="text-purple-400">-${ep.slippagePct}% (시장가 체결 미끄러짐)</span></div>
+    <div class="flex justify-between"><span class="text-gray-500">⏰ 시간 청산</span><span class="text-yellow-400">${Math.round(ep.maxHoldSec/60)}분 초과</span></div>
+    <div class="flex justify-between text-gray-600 pt-1 border-t border-gray-800 mt-1"><span>총 비용</span><span>수수료 ${fee}% + 슬리피지 ${ep.slippagePct}% = ${(fee+ep.slippagePct).toFixed(3)}%</span></div>
   `;
 }
 
@@ -555,50 +567,123 @@ async function runScan() {
   renderPositions();
 }
 
-// 포지션 청산 체크
+// ─── 전략별 청산 파라미터 ────────────────────────────────────────
+const EXIT_PARAMS = {
+  // ⚡ 스캘핑: 빠른 익절·손절, 타이트한 트레일링
+  scalping: {
+    maxHoldSec:      900,   // 최대 보유 15분
+    // 트레일링 스탑: 익절목표 돌파 후 고점에서 얼마 빠지면 매도
+    trailTriggerMult: 1.0,  // 익절목표 × 1.0 = 목표 도달 즉시 트레일 발동
+    trailDropPct:     0.4,  // 고점에서 0.4%p 하락 시 청산 (ex: 고점 2% → 1.6% 이하 시 매도)
+    // 슬리피지: 시장가 매도 시 불리한 방향으로 미끄러짐
+    slippagePct:      0.05, // 0.05% 슬리피지 (스캘핑 종목은 유동성 높아 낮음)
+    // 시간 청산: maxHold 경과 + 소폭 수익 있으면 청산
+    timeExitMinPnl:   0.1,
+  },
+  // 📊 거래량: 중간 트레일, 더 긴 보유
+  volume: {
+    maxHoldSec:      1800,
+    trailTriggerMult: 1.0,
+    trailDropPct:     0.6,
+    slippagePct:      0.08,
+    timeExitMinPnl:   0.1,
+  },
+  // 🚀 모멘텀: 느슨한 트레일, 추세 타기
+  momentum: {
+    maxHoldSec:      3600,
+    trailTriggerMult: 1.2,  // 익절목표 120% 도달 시 트레일 발동 (더 달리게)
+    trailDropPct:     1.0,
+    slippagePct:      0.10,
+    timeExitMinPnl:   0.0,  // 시간 청산 시 수익 조건 없음
+  },
+  // ↩️ 평균회귀: 빠른 수익 확정, 반등 후 즉시 청산
+  mean_reversion: {
+    maxHoldSec:      7200,
+    trailTriggerMult: 0.8,  // 익절목표의 80% 도달 시 바로 트레일 발동
+    trailDropPct:     0.3,
+    slippagePct:      0.12,
+    timeExitMinPnl:   0.0,
+  },
+};
+
+// 포지션 청산 체크 (전략별 트레일링 스탑 + 슬리피지 적용)
 async function checkPositionsForExit() {
+  const ep = EXIT_PARAMS[STATE.strategy] || EXIT_PARAMS.scalping;
+
   for (let i = STATE.positions.length - 1; i >= 0; i--) {
     const pos = STATE.positions[i];
     const currentPrice = await fetchCurrentPrice(pos.ticker);
     if (!currentPrice) continue;
 
     pos.currentPrice = currentPrice;
-    const pnlPct = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
-    const netPnlPct = pnlPct - 0.245; // 수수료 차감
-    pos.pnlPct = pnlPct;
+    const pnlPct    = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
+    pos.pnlPct      = pnlPct;
 
-    const holdSec = (Date.now() - pos.entryTime) / 1000;
+    // 고점 갱신
+    if (pnlPct > (pos.peakPnl || 0)) pos.peakPnl = pnlPct;
+
+    const holdSec   = (Date.now() - pos.entryTime) / 1000;
+    const target    = STATE.config.profitTarget;
+    const stopLoss  = STATE.config.stopLoss;
 
     let exitReason = null;
+    let exitType   = null; // 'profit' | 'loss' | 'trail' | 'time'
 
-    // 익절
-    if (pnlPct >= STATE.config.profitTarget) {
-      exitReason = `익절 +${pnlPct.toFixed(2)}%`;
-    }
-    // 손절
-    else if (pnlPct <= -STATE.config.stopLoss) {
+    // ── 1) 손절 ─────────────────────────────────────────────────
+    if (pnlPct <= -stopLoss) {
       exitReason = `손절 ${pnlPct.toFixed(2)}%`;
+      exitType   = 'loss';
     }
-    // 시간 청산 (전략별)
-    else {
-      const maxHold = { scalping: 900, volume: 1800, momentum: 3600, mean_reversion: 7200 }[STATE.strategy] || 1800;
-      if (holdSec >= maxHold && pnlPct > 0.1) {
-        exitReason = `시간청산 (${Math.round(holdSec/60)}분 경과) +${pnlPct.toFixed(2)}%`;
+
+    // ── 2) 트레일링 스탑 ────────────────────────────────────────
+    // 트레일 발동 조건: 익절목표 × trailTriggerMult 최초 도달
+    else if (pnlPct >= target * ep.trailTriggerMult) {
+      if (!pos.trailArmed) {
+        pos.trailArmed = true;
+        addLog('scan', `   🔒 트레일 발동: ${pos.name} 고점 ${pos.peakPnl.toFixed(2)}% (목표 ${target}% × ${ep.trailTriggerMult}× 돌파)`);
+      }
+      // 고점에서 trailDropPct 이상 하락 시 청산
+      const dropFromPeak = pos.peakPnl - pnlPct;
+      if (dropFromPeak >= ep.trailDropPct) {
+        exitReason = `트레일 청산 | 고점 +${pos.peakPnl.toFixed(2)}% → 현재 +${pnlPct.toFixed(2)}% (${dropFromPeak.toFixed(2)}%p 하락)`;
+        exitType   = 'trail';
+      }
+    }
+
+    // ── 3) 단순 익절 (트레일 미발동 상태에서 목표 도달) ──────────
+    // 트레일 발동 전이고 목표 도달: 트레일 준비 (즉시 청산 안 함)
+    // → 위 2번 조건에서 trailArmed가 설정됨
+
+    // ── 4) 시간 청산 ────────────────────────────────────────────
+    else if (holdSec >= ep.maxHoldSec) {
+      if (pnlPct > ep.timeExitMinPnl) {
+        exitReason = `시간청산 (${Math.round(holdSec/60)}분) +${pnlPct.toFixed(2)}%`;
+        exitType   = 'time';
+      } else if (pnlPct <= 0) {
+        // 손익 없거나 손실 상태로 최대 시간 초과 → 손실 최소화 청산
+        exitReason = `시간초과 청산 (${Math.round(holdSec/60)}분) ${pnlPct.toFixed(2)}%`;
+        exitType   = 'time';
       }
     }
 
     if (exitReason) {
-      await executeExit(pos, exitReason, netPnlPct);
+      // 슬리피지 적용: 시장가 매도 시 불리하게 체결
+      const slippage  = ep.slippagePct;
+      const netPnlPct = pnlPct - 0.245 - slippage; // 수수료 + 슬리피지 차감
+      await executeExit(pos, exitReason, netPnlPct, exitType, slippage);
       STATE.positions.splice(i, 1);
     }
   }
 }
 
-// 매도 실행
-async function executeExit(pos, reason, netPnlPct) {
-  const investAmt = pos.entryPrice * pos.qty;
-  const profitAmt = Math.round(investAmt * netPnlPct / 100);
-  const isWin = netPnlPct > 0;
+// 매도 실행 (슬리피지 반영)
+async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
+  const slip = slippagePct || 0.05;
+  // 실제 체결가 = 현재가에서 슬리피지만큼 불리하게 (매도 → 더 낮게)
+  const actualExitPrice = Math.round(pos.currentPrice * (1 - slip / 100));
+  const investAmt  = pos.entryPrice * pos.qty;
+  const profitAmt  = Math.round(investAmt * netPnlPct / 100);
+  const isWin      = netPnlPct > 0;
 
   if (STATE.mode === 'live') {
     try {
@@ -621,24 +706,29 @@ async function executeExit(pos, reason, netPnlPct) {
   STATE.profitHistory.push({ time: new Date().toLocaleTimeString('ko-KR', {hour:'2-digit',minute:'2-digit'}), cumProfit: STATE.stats.totalProfit });
   updateProfitChart();
 
-  const icon = isWin ? '✅' : '🚨';
+  const icon  = isWin ? '✅' : '🚨';
   const color = isWin ? 'profit' : 'loss';
-  addLog(color, `${icon} 매도 완료: ${pos.name || pos.ticker} — ${reason}`);
-  addLog(color, `   진입 ${fmtPrice(pos.entryPrice)} → 청산 ${fmtPrice(pos.currentPrice)} | 손익 ${profitAmt > 0 ? '+' : ''}${fmtPrice(profitAmt)}원 (${netPnlPct > 0 ? '+' : ''}${netPnlPct.toFixed(2)}%)`);
+  const typeLabel = { profit: '익절', loss: '손절', trail: '트레일', time: '시간청산' }[exitType] || '청산';
+  addLog(color, `${icon} [${typeLabel}] ${pos.name || pos.ticker} — ${reason}`);
+  addLog(color, `   진입 ${fmtPrice(pos.entryPrice)} → 현재가 ${fmtPrice(pos.currentPrice)} → 체결 ${fmtPrice(actualExitPrice)} (슬리피지 -${slip}%)`);
+  addLog(color, `   고점 +${(pos.peakPnl||0).toFixed(2)}% | 순손익 ${profitAmt > 0 ? '+' : ''}${fmtPrice(profitAmt)}원 (수수료+슬리피지 후 ${netPnlPct > 0 ? '+' : ''}${netPnlPct.toFixed(2)}%)`);
 
   // 거래 기록
   await recordTrade({
-    ticker: pos.ticker,
-    name: pos.name || pos.ticker,
-    side: 'sell',
+    ticker:     pos.ticker,
+    name:       pos.name || pos.ticker,
+    side:       'sell',
     entryPrice: pos.entryPrice,
-    exitPrice: pos.currentPrice,
-    qty: pos.qty,
-    pnlPct: netPnlPct,
+    exitPrice:  actualExitPrice,
+    qty:        pos.qty,
+    pnlPct:     netPnlPct,
     profitAmt,
+    peakPnl:    pos.peakPnl || 0,
+    slippage:   slip,
+    exitType,
     reason,
-    timestamp: new Date().toISOString(),
-    mode: STATE.mode,
+    timestamp:  new Date().toISOString(),
+    mode:       STATE.mode,
   });
   await loadTradeHistory();
 }
@@ -793,6 +883,8 @@ async function executeEntry(candidate) {
     entryTime:    Date.now(),
     currentPrice: candidate.price,
     pnlPct:       0,
+    peakPnl:      0,      // 트레일링 스탑용 고점 수익률 추적
+    trailArmed:   false,  // 익절 목표 최초 돌파 여부
     score:        candidate.score,
   };
   STATE.positions.push(pos);
@@ -812,6 +904,8 @@ async function tickPositions() {
     if (price) {
       pos.currentPrice = price;
       pos.pnlPct = ((price - pos.entryPrice) / pos.entryPrice) * 100;
+      // 고점 갱신 (트레일링 스탑용)
+      if (pos.pnlPct > (pos.peakPnl || 0)) pos.peakPnl = pos.pnlPct;
     }
   }
   renderPositions();
@@ -851,19 +945,35 @@ function renderPositions() {
   }
 
   el.innerHTML = STATE.positions.map(pos => {
-    const netPnl = pos.pnlPct - 0.245;
-    const isProfit = netPnl >= 0;
-    const holdMin  = Math.floor((Date.now() - pos.entryTime) / 60000);
-    const holdSec  = Math.floor(((Date.now() - pos.entryTime) % 60000) / 1000);
-    const pnlAmt   = Math.round(pos.entryPrice * pos.qty * netPnl / 100);
-    const bar      = Math.min(Math.abs(pos.pnlPct) / STATE.config.profitTarget * 100, 100);
+    const ep        = EXIT_PARAMS[STATE.strategy] || EXIT_PARAMS.scalping;
+    const netPnl    = pos.pnlPct - 0.245;
+    const isProfit  = netPnl >= 0;
+    const holdMin   = Math.floor((Date.now() - pos.entryTime) / 60000);
+    const holdSec   = Math.floor(((Date.now() - pos.entryTime) % 60000) / 1000);
+    const pnlAmt    = Math.round(pos.entryPrice * pos.qty * netPnl / 100);
+    const bar       = Math.min(Math.abs(pos.pnlPct) / STATE.config.profitTarget * 100, 100);
+    const peakPnl   = pos.peakPnl || 0;
+    const dropFromPeak = peakPnl - pos.pnlPct;
+
+    // 트레일 상태 배지
+    const trailBadge = pos.trailArmed
+      ? `<span class="ml-1 px-1 py-0.5 rounded text-xs bg-orange-900/60 text-orange-300">🔒트레일</span>`
+      : (pos.pnlPct >= STATE.config.profitTarget * ep.trailTriggerMult
+          ? `<span class="ml-1 px-1 py-0.5 rounded text-xs bg-yellow-900/60 text-yellow-300">목표도달</span>`
+          : '');
+
+    // 고점 대비 낙폭 경고
+    const dropWarn = pos.trailArmed && dropFromPeak > ep.trailDropPct * 0.5
+      ? `<span class="text-orange-400">↘ 고점-${dropFromPeak.toFixed(2)}%p (청산기준 -${ep.trailDropPct}%p)</span>`
+      : `<span>익절까지 ${Math.max(0, (STATE.config.profitTarget - pos.pnlPct)).toFixed(2)}%</span>`;
 
     return `
     <div class="position-card ${isProfit ? 'profit' : 'loss'}">
       <div class="flex justify-between items-start mb-1">
-        <div>
+        <div class="flex items-center flex-wrap gap-1">
           <span class="font-medium text-sm text-white">${pos.name}</span>
-          <span class="text-gray-500 text-xs ml-1">${pos.ticker}</span>
+          <span class="text-gray-500 text-xs">${pos.ticker}</span>
+          ${trailBadge}
         </div>
         <div class="text-right">
           <div class="${isProfit ? 'text-profit' : 'text-loss'} font-bold text-sm">
@@ -878,10 +988,11 @@ function renderPositions() {
         <span>진입 ${fmtPrice(pos.entryPrice)} → 현재 ${fmtPrice(pos.currentPrice)}</span>
         <span>${holdMin}분 ${holdSec}초</span>
       </div>
+      ${peakPnl > 0 ? `<div class="text-xs text-gray-600 mt-0.5">고점 +${peakPnl.toFixed(2)}% | 슬리피지 -${ep.slippagePct}%</div>` : ''}
       <div class="mt-1.5 h-1 bg-gray-800 rounded">
-        <div class="h-1 rounded ${isProfit ? 'bg-green-500' : 'bg-red-500'}" style="width:${bar}%"></div>
+        <div class="h-1 rounded ${pos.trailArmed ? 'bg-orange-500' : (isProfit ? 'bg-green-500' : 'bg-red-500')}" style="width:${bar}%"></div>
       </div>
-      <div class="text-xs text-gray-600 mt-0.5">익절까지 ${Math.max(0, (STATE.config.profitTarget - pos.pnlPct)).toFixed(2)}%</div>
+      <div class="text-xs text-gray-600 mt-0.5">${dropWarn}</div>
     </div>`;
   }).join('');
 }
