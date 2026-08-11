@@ -12,11 +12,14 @@ const STATE = {
   stats: { totalTrades: 0, winTrades: 0, totalProfit: 0, dailyProfit: 0 },
   config: {
     maxPositions: 3,
-    positionSizeRatio: 0.30,
+    positionSizeRatio: 0.30,   // 레거시 (사용 안 함, 호환성 보존)
     profitTarget: 1.5,
     stopLoss: 1.0,
     scanInterval: 30,
     paperCapital: 5000000,
+    posMinAmt: 50000,          // 포지션 최솟값 (원)
+    posMaxAmt: 150000,         // 포지션 최댓값 (원, 상한율 적용 전 기본)
+    posCapMult: 1.0,           // 상한율 배수 (1.0 ~ 5.0)
   },
   paperBalance: 5000000,   // 페이퍼 가용 현금
   scanTimer: null,

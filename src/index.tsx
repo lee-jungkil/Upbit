@@ -489,18 +489,67 @@ app.get('/', (c) => {
               class="w-14 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-xs text-blue-400 text-center focus:outline-none focus:border-blue-500">
           </div>
         </div>
-        <!-- 포지션 비율 -->
-        <div>
-          <label class="text-xs text-gray-400 flex justify-between mb-1">
-            <span>포지션 비율 (%)</span><span id="posratio-val" class="text-yellow-400">30%</span>
-          </label>
-          <div class="flex items-center gap-2">
-            <input type="range" id="pos-ratio" min="5" max="50" step="5" value="30"
-              oninput="updateSlider('pos-ratio','posratio-val','%')"
-              class="flex-1 accent-yellow-500">
-            <input type="number" id="pos-ratio-num" min="5" max="50" step="5" value="30"
-              oninput="syncSliderFromNum('pos-ratio','pos-ratio-num','posratio-val','%')"
-              class="w-14 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-xs text-yellow-400 text-center focus:outline-none focus:border-yellow-500">
+        <!-- 포지션 금액 범위 -->
+        <div class="bg-gray-800/60 rounded-lg p-3 space-y-2.5 border border-gray-700/50">
+          <div class="flex items-center justify-between">
+            <span class="text-xs text-gray-300 font-medium">포지션 1건 금액 범위</span>
+            <button onclick="resetPositionRange()" class="text-xs text-gray-500 hover:text-blue-400 transition">
+              <i class="fas fa-undo-alt mr-0.5"></i>기본값
+            </button>
+          </div>
+          <!-- 자동 기본값 미리보기 -->
+          <div id="pos-range-preview" class="text-xs text-blue-300/80 bg-blue-950/40 rounded px-2 py-1.5 border border-blue-900/40">
+            자본금 기준 자동 계산됩니다
+          </div>
+          <!-- 최솟값 -->
+          <div>
+            <label class="text-xs text-gray-400 flex justify-between mb-1">
+              <span>최소 투자금</span>
+              <span id="pos-min-val" class="text-yellow-400 font-medium">50,000원</span>
+            </label>
+            <div class="flex items-center gap-2">
+              <input type="range" id="pos-min" min="10000" max="5000000" step="10000" value="50000"
+                oninput="onPosRangeChange()"
+                class="flex-1 accent-yellow-500">
+              <input type="number" id="pos-min-num" min="1" max="9999" step="1" value="5"
+                oninput="onPosRangeNumChange('min')"
+                class="w-14 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-xs text-yellow-400 text-center focus:outline-none focus:border-yellow-500">
+              <span class="text-xs text-gray-500 w-5">만</span>
+            </div>
+          </div>
+          <!-- 최댓값 -->
+          <div>
+            <label class="text-xs text-gray-400 flex justify-between mb-1">
+              <span>최대 투자금</span>
+              <span id="pos-max-val" class="text-orange-400 font-medium">150,000원</span>
+            </label>
+            <div class="flex items-center gap-2">
+              <input type="range" id="pos-max" min="10000" max="5000000" step="10000" value="150000"
+                oninput="onPosRangeChange()"
+                class="flex-1 accent-orange-500">
+              <input type="number" id="pos-max-num" min="1" max="9999" step="1" value="15"
+                oninput="onPosRangeNumChange('max')"
+                class="w-14 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-xs text-orange-400 text-center focus:outline-none focus:border-orange-500">
+              <span class="text-xs text-gray-500 w-5">만</span>
+            </div>
+          </div>
+          <!-- 상한율 슬라이더 (기본 최댓값 대비 배수) -->
+          <div class="pt-1 border-t border-gray-700/50">
+            <label class="text-xs text-gray-400 flex justify-between mb-1">
+              <span>상한율 <span class="text-gray-600">(기본 최대 대비)</span></span>
+              <span id="pos-cap-val" class="text-red-400 font-medium">1.0×</span>
+            </label>
+            <input type="range" id="pos-cap" min="1.0" max="5.0" step="0.5" value="1.0"
+              oninput="onPosCapChange()"
+              class="w-full accent-red-500">
+            <div class="flex justify-between text-xs text-gray-600 mt-0.5">
+              <span>기본</span><span>1.5×</span><span>2×</span><span>3×</span><span>4×</span><span>5×</span>
+            </div>
+          </div>
+          <!-- 최종 적용 범위 요약 -->
+          <div class="flex items-center justify-between bg-gray-900/60 rounded px-2 py-1.5 text-xs">
+            <span class="text-gray-500">실제 적용 범위</span>
+            <span id="pos-range-final" class="text-white font-medium">5만 ~ 15만원</span>
           </div>
         </div>
         <!-- 페이퍼 초기 자금 -->
