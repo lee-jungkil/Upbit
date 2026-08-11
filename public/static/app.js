@@ -53,7 +53,7 @@ function apiHeaders() {
 // ─── 초기화 ───────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
   loadSavedKeys();
-  loadConfig();
+  loadConfig();           // 저장된 범위 복원 or 기본값 자동 계산 포함
   renderStrategyConditions();
   updateMarketStatus();
   await loadTradeHistory();
@@ -143,6 +143,8 @@ function updateCapitalSlider() {
   document.getElementById('paper-capital-val').textContent = val + '00만원';
   document.getElementById('paper-capital-num').value = val;
   STATE.config.paperCapital = val * 1000000;
+  // 자본금 바뀌면 포지션 범위 미리보기 갱신 (강제 리셋 X — 사용자 수동 값 보존)
+  applyDefaultPositionRange(STATE.config.paperCapital, false);
 }
 
 // 숫자 입력 → 슬라이더 동기화
@@ -160,6 +162,124 @@ function syncCapitalFromNum() {
   document.getElementById('paper-capital').value = val;
   document.getElementById('paper-capital-val').textContent = val + '00만원';
   STATE.config.paperCapital = val * 1000000;
+  // 자본금 바뀌면 포지션 범위 기본값도 미리보기 갱신
+  applyDefaultPositionRange(STATE.config.paperCapital, false);
+}
+
+// ─── 포지션 금액 범위 ─────────────────────────────────────────
+
+/**
+ * 자본금에서 기본 min/max 계산
+ * 기본 비율: min = 자본금×10%, max = 자본금×30%
+ * 500만 → 50만/150만 | 1000만 → 100만/300만
+ */
+function calcDefaultRange(capital) {
+  const minAmt = Math.round(capital * 0.10 / 10000) * 10000;   // 10% 단위 만원
+  const maxAmt = Math.round(capital * 0.30 / 10000) * 10000;   // 30% 단위 만원
+  return { minAmt, maxAmt };
+}
+
+/** 만원 → "X만원" 또는 "X,XXX만원" 표기 */
+function fmtManwon(won) {
+  const man = Math.round(won / 10000);
+  return man.toLocaleString('ko-KR') + '만원';
+}
+
+/**
+ * 자본금 기준 기본값을 UI에 반영
+ * @param {number} capital  적용할 자본금
+ * @param {boolean} force   true면 STATE.config까지 덮어씀 (리셋 버튼)
+ */
+function applyDefaultPositionRange(capital, force) {
+  const { minAmt, maxAmt } = calcDefaultRange(capital);
+
+  // 슬라이더 max 동적 조정 (자본금의 100%까지 허용)
+  const sliderMax = Math.max(capital, 1000000);
+  document.getElementById('pos-min').max = sliderMax;
+  document.getElementById('pos-max').max = sliderMax;
+
+  if (force) {
+    // 리셋: STATE + UI 모두 기본값으로
+    STATE.config.posMinAmt  = minAmt;
+    STATE.config.posMaxAmt  = maxAmt;
+    STATE.config.posCapMult = 1.0;
+    document.getElementById('pos-min').value    = minAmt;
+    document.getElementById('pos-max').value    = maxAmt;
+    document.getElementById('pos-min-num').value = Math.round(minAmt / 10000);
+    document.getElementById('pos-max-num').value = Math.round(maxAmt / 10000);
+    document.getElementById('pos-cap').value    = 1.0;
+    document.getElementById('pos-cap-val').textContent = '1.0×';
+  }
+
+  // 미리보기 텍스트 항상 갱신
+  const preEl = document.getElementById('pos-range-preview');
+  if (preEl) {
+    preEl.textContent =
+      `자본금 ${fmtManwon(capital)} 기준 기본값 — 최소 ${fmtManwon(minAmt)} / 최대 ${fmtManwon(maxAmt)}`;
+  }
+
+  refreshPosRangeUI();
+}
+
+/** 슬라이더/숫자 입력 후 레이블·STATE·최종범위 동기화 */
+function refreshPosRangeUI() {
+  const minAmt = STATE.config.posMinAmt;
+  const maxAmt = STATE.config.posMaxAmt;
+  const cap    = STATE.config.posCapMult;
+  const finalMax = Math.round(maxAmt * cap / 10000) * 10000;
+
+  document.getElementById('pos-min-val').textContent  = fmtManwon(minAmt);
+  document.getElementById('pos-max-val').textContent  = fmtManwon(maxAmt);
+  document.getElementById('pos-cap-val').textContent  = cap.toFixed(1) + '×';
+  document.getElementById('pos-range-final').textContent =
+    `${fmtManwon(minAmt)} ~ ${fmtManwon(finalMax)}`;
+
+  // 최솟값 > 최댓값 경고 표시
+  const finalEl = document.getElementById('pos-range-final');
+  if (minAmt > maxAmt) {
+    finalEl.className = 'text-red-400 font-medium';
+    finalEl.textContent = '⚠️ 최솟값이 최댓값보다 큽니다';
+  } else {
+    finalEl.className = 'text-white font-medium';
+  }
+}
+
+/** 슬라이더(pos-min / pos-max) 변경 시 */
+function onPosRangeChange() {
+  const minSlider = parseInt(document.getElementById('pos-min').value);
+  const maxSlider = parseInt(document.getElementById('pos-max').value);
+  STATE.config.posMinAmt = minSlider;
+  STATE.config.posMaxAmt = maxSlider;
+  document.getElementById('pos-min-num').value = Math.round(minSlider / 10000);
+  document.getElementById('pos-max-num').value = Math.round(maxSlider / 10000);
+  refreshPosRangeUI();
+}
+
+/** 만원 숫자 입력(pos-min-num / pos-max-num) 변경 시 */
+function onPosRangeNumChange(which) {
+  const numId   = which === 'min' ? 'pos-min-num' : 'pos-max-num';
+  const slId    = which === 'min' ? 'pos-min'     : 'pos-max';
+  const man     = parseInt(document.getElementById(numId).value) || 1;
+  const won     = man * 10000;
+  const slMax   = parseInt(document.getElementById(slId).max);
+  const clamped = Math.min(Math.max(won, 10000), slMax);
+  document.getElementById(slId).value = clamped;
+  if (which === 'min') STATE.config.posMinAmt = clamped;
+  else                 STATE.config.posMaxAmt = clamped;
+  refreshPosRangeUI();
+}
+
+/** 상한율 슬라이더 변경 시 */
+function onPosCapChange() {
+  const cap = parseFloat(document.getElementById('pos-cap').value);
+  STATE.config.posCapMult = cap;
+  refreshPosRangeUI();
+}
+
+/** 기본값 리셋 버튼 */
+function resetPositionRange() {
+  applyDefaultPositionRange(STATE.config.paperCapital, true);
+  addLog('info', `↩️ 포지션 금액 기본값 복원 — ${fmtManwon(STATE.config.posMinAmt)} ~ ${fmtManwon(STATE.config.posMaxAmt)}`);
 }
 
 // 포지션 카드의 +/- 버튼
@@ -208,7 +328,6 @@ function loadConfig() {
   const p  = STATE.config.profitTarget;
   const sl = STATE.config.stopLoss;
   const mp = STATE.config.maxPositions;
-  const pr = Math.round(STATE.config.positionSizeRatio * 100);
   const pc = Math.round(STATE.config.paperCapital / 1000000);
 
   document.getElementById('profit-target').value      = p;
@@ -217,8 +336,6 @@ function loadConfig() {
   document.getElementById('stop-loss-num').value      = sl;
   document.getElementById('max-positions').value      = mp;
   document.getElementById('max-positions-num').value  = mp;
-  document.getElementById('pos-ratio').value          = pr;
-  document.getElementById('pos-ratio-num').value      = pr;
   document.getElementById('paper-capital').value      = pc;
   document.getElementById('paper-capital-num').value  = pc;
   document.getElementById('strategy-select').value    = localStorage.getItem('bot_strategy') || 'scalping';
@@ -228,22 +345,47 @@ function loadConfig() {
   document.getElementById('stoploss-val').textContent      = sl + '%';
   document.getElementById('maxpos-val').textContent        = mp + '개';
   document.getElementById('maxpos-display').textContent    = mp;
-  document.getElementById('posratio-val').textContent      = pr + '%';
   document.getElementById('paper-capital-val').textContent = pc + '00만원';
+
+  // 포지션 금액 범위 UI 복원
+  // 저장된 값이 없으면(최초 실행) 자본금 기반 기본값으로 초기화
+  const hasRange = saved && JSON.parse(saved).posMinAmt;
+  if (!hasRange) {
+    applyDefaultPositionRange(STATE.config.paperCapital, true);
+  } else {
+    // 저장된 값 UI에 반영
+    const minAmt = STATE.config.posMinAmt;
+    const maxAmt = STATE.config.posMaxAmt;
+    const cap    = STATE.config.posCapMult;
+    const slMax  = Math.max(STATE.config.paperCapital, 1000000);
+    document.getElementById('pos-min').max   = slMax;
+    document.getElementById('pos-max').max   = slMax;
+    document.getElementById('pos-min').value = minAmt;
+    document.getElementById('pos-max').value = maxAmt;
+    document.getElementById('pos-min-num').value = Math.round(minAmt / 10000);
+    document.getElementById('pos-max-num').value = Math.round(maxAmt / 10000);
+    document.getElementById('pos-cap').value     = cap;
+    applyDefaultPositionRange(STATE.config.paperCapital, false);
+    refreshPosRangeUI();
+  }
 }
 
 function saveConfig() {
   STATE.config.profitTarget      = parseFloat(document.getElementById('profit-target').value);
   STATE.config.stopLoss          = parseFloat(document.getElementById('stop-loss').value);
   STATE.config.maxPositions      = parseInt(document.getElementById('max-positions').value);
-  STATE.config.positionSizeRatio = parseInt(document.getElementById('pos-ratio').value) / 100;
+  STATE.config.posMinAmt         = parseInt(document.getElementById('pos-min').value);
+  STATE.config.posMaxAmt         = parseInt(document.getElementById('pos-max').value);
+  STATE.config.posCapMult        = parseFloat(document.getElementById('pos-cap').value);
   STATE.strategy                 = document.getElementById('strategy-select').value;
   localStorage.setItem('bot_config', JSON.stringify(STATE.config));
   localStorage.setItem('bot_strategy', STATE.strategy);
   // 카드 동기화
   document.getElementById('maxpos-display').textContent = STATE.config.maxPositions;
   renderPosSlots();
+  const finalMax = Math.round(STATE.config.posMaxAmt * STATE.config.posCapMult / 10000) * 10000;
   addLog('info', `💾 설정 저장 — 최대포지션: ${STATE.config.maxPositions}개, 익절: ${STATE.config.profitTarget}%, 손절: ${STATE.config.stopLoss}%`);
+  addLog('info', `   포지션 금액: ${fmtManwon(STATE.config.posMinAmt)} ~ ${fmtManwon(finalMax)} (상한율 ${STATE.config.posCapMult.toFixed(1)}×)`);
   renderStrategyConditions();
   updateStatsUI();
 }
@@ -353,7 +495,9 @@ async function startBot() {
   const modeName = STATE.mode === 'paper' ? '📄 페이퍼' : '🔴 실전';
   const stratName = STRATEGY_META[STATE.strategy]?.name || STATE.strategy;
   addLog('info', `🚀 봇 시작 — 모드: ${modeName} | 전략: ${stratName}`);
+  const posMaxFinal = Math.round(STATE.config.posMaxAmt * STATE.config.posCapMult / 10000) * 10000;
   addLog('info', `   익절: +${STATE.config.profitTarget}% | 손절: -${STATE.config.stopLoss}% | 최대포지션: ${STATE.config.maxPositions}개`);
+  addLog('info', `   포지션 금액: ${fmtManwon(STATE.config.posMinAmt)} ~ ${fmtManwon(posMaxFinal)} (상한율 ${STATE.config.posCapMult.toFixed(1)}×)`);
 
   // 즉시 1회 스캔 후 주기 실행
   await runScan();
@@ -603,10 +747,24 @@ async function executeEntry(candidate) {
     return;
   }
 
-  const investAmt = Math.min(
-    Math.round(available * STATE.config.positionSizeRatio),
-    available
-  );
+  // ── 포지션 금액 범위 로직 ──────────────────────────────
+  // 실제 최대 = 사용자 설정 최댓값 × 상한율
+  const posMin    = STATE.config.posMinAmt  || 50000;
+  const posMaxBase= STATE.config.posMaxAmt  || 150000;
+  const posCapMult= STATE.config.posCapMult || 1.0;
+  const posMaxFinal = Math.round(posMaxBase * posCapMult / 10000) * 10000;
+
+  // 가용 현금이 최솟값보다 적으면 진입 불가
+  if (available < posMin) {
+    addLog('warn', `⚠️ 가용 현금(${fmtPrice(available)}원)이 포지션 최솟값(${fmtManwon(posMin)})보다 적음`);
+    return;
+  }
+
+  // 투자금 = min ~ max 범위 내 랜덤 (가용 현금 초과 불가)
+  // 조건에 따른 score 비례: score 높을수록 max에 가깝게
+  const score     = (candidate.score || 70) / 100;           // 0~1
+  const rawAmt    = posMin + Math.round((posMaxFinal - posMin) * score);
+  const investAmt = Math.min(rawAmt, available, posMaxFinal);
 
   if (investAmt < 10000) return;
 
@@ -640,7 +798,7 @@ async function executeEntry(candidate) {
   STATE.positions.push(pos);
 
   addLog('buy', `💰 매수: ${pos.name} (${pos.ticker})`);
-  addLog('buy', `   진입가 ${fmtPrice(pos.entryPrice)}원 | ${qty}주 | 투자 ${fmtPrice(qty * price)}원`);
+  addLog('buy', `   진입가 ${fmtPrice(pos.entryPrice)}원 | ${qty}주 | 투자 ${fmtPrice(qty * price)}원 (범위: ${fmtManwon(posMin)}~${fmtManwon(posMaxFinal)})`);
   renderPositions();
   updateStatsUI(); // 매수 즉시 총자산 카드 반영
 }
