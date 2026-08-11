@@ -30,6 +30,8 @@ const STATE = {
   // ── 적응형 진입 조건 ───────────────────────────────────
   adaptiveMode: 1,         // 0=공격 1=기본 2=방어 3=대기
   recentResults: [],       // 최근 10회 거래 결과 [{win:bool, pnlPct}]
+  // ── 내부 플래그 ────────────────────────────────────────
+  _lastMarketClosedLog: 0, // 장 외 안내 로그 마지막 출력 타임스탬프
 };
 
 // API 키 (세션 스토리지)
@@ -674,6 +676,18 @@ async function startBot() {
   addLog('info', `   익절: +${STATE.config.profitTarget}% | 손절: -${STATE.config.stopLoss}% | 최대포지션: ${STATE.config.maxPositions}개`);
   addLog('info', `   포지션 금액: ${fmtManwon(STATE.config.posMinAmt)} ~ ${fmtManwon(posMaxFinal)} (상한율 ${STATE.config.posCapMult.toFixed(1)}×)`);
 
+  // 장 시간 안내
+  if (STATE.mode === 'live') {
+    if (isMarketOpen()) {
+      addLog('info', `   🟢 현재 정규장 시간 — 즉시 매매 활성`);
+    } else {
+      addLog('warn', `   ⚫ 현재 장 외 시간 — 신규 진입 차단, 보유 포지션 청산 체크만 진행`);
+      addLog('warn', `   📅 다음 개장: ${getNextOpenStr()}`);
+    }
+  } else {
+    addLog('info', `   📄 페이퍼 모드 — 장 시간 무관하게 시뮬레이션 실행`);
+  }
+
   // 즉시 1회 스캔 후 주기 실행
   await runScan();
   scheduleNextScan();
@@ -714,13 +728,30 @@ function scheduleNextScan() {
 
 // ─── 메인 스캔 로직 ───────────────────────────────────────────
 async function runScan() {
-  addLog('scan', `🔍 [스캔] ${STATE.strategy.toUpperCase()} 전략 스캔 시작...`);
+  const marketOpen = isMarketOpen();
+  const modeName   = STATE.mode === 'paper' ? '페이퍼' : '실전';
 
-  // 1) 포지션 청산 체크 (먼저)
+  // ─ 장 외 시간 안내 (처음 1회만 로그 출력 — 반복 스팸 방지)
+  if (!marketOpen && STATE.mode === 'live') {
+    if (!STATE._lastMarketClosedLog || Date.now() - STATE._lastMarketClosedLog > 5 * 60 * 1000) {
+      addLog('warn', `⏸️  [실전] 장 외 시간 — 신규 진입 차단 (보유 포지션 청산 체크는 계속)`);
+      STATE._lastMarketClosedLog = Date.now();
+    }
+  }
+
+  const stratName = (STATE.strategy || 'scalping').toUpperCase();
+  const timeStr   = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  addLog('scan', `🔍 [스캔 ${timeStr}] ${stratName} | ${modeName} | 장: ${marketOpen ? '🟢 정규장' : '⚫ 장 외'}`);
+
+  // 1) 포지션 청산 체크 — 장 외에도 실행 (손절·트레일 보호)
   await checkPositionsForExit();
 
-  // 2) 신규 진입 조건 검색
-  if (STATE.positions.length < STATE.config.maxPositions) {
+  // 2) 신규 진입 — 정규장 시간에만 허용 (페이퍼 모드는 항상 허용)
+  const canEnter = STATE.mode === 'paper' || marketOpen;
+
+  if (!canEnter) {
+    addLog('scan', `   ⏸️  장 외 시간 — 신규 진입 차단 (${getNextOpenStr()} 개장 예정)`);
+  } else if (STATE.positions.length < STATE.config.maxPositions) {
     await scanForEntries();
   } else {
     addLog('scan', `   📊 포지션 최대 (${STATE.positions.length}/${STATE.config.maxPositions}) — 진입 스킵`);
@@ -1431,6 +1462,21 @@ async function loadVolumeRank() {
 }
 
 // ─── 장 상태 ──────────────────────────────────────────────────
+
+/**
+ * 현재 정규 거래 가능 여부 반환 (09:00~15:30, 평일만)
+ * runScan() / scanForEntries() 에서 진입 차단에 사용
+ */
+function isMarketOpen() {
+  const now = new Date();
+  const h   = now.getHours(), m = now.getMinutes();
+  const day = now.getDay(); // 0=일, 6=토
+  if (day === 0 || day === 6) return false;
+  // 09:00:00 이상, 15:30:00 이하
+  const minTotal = h * 60 + m;
+  return minTotal >= 9 * 60 && minTotal <= 15 * 60 + 30;
+}
+
 function updateMarketStatus() {
   const now = new Date();
   const h = now.getHours(), m = now.getMinutes();
@@ -1439,7 +1485,7 @@ function updateMarketStatus() {
   const label = document.getElementById('market-label');
 
   const isWeekday = day >= 1 && day <= 5;
-  const inSession = isWeekday && ((h === 9 && m >= 0) || (h > 9 && h < 15) || (h === 15 && m <= 30));
+  const inSession = isMarketOpen();
   const preOpen   = isWeekday && h === 8 && m >= 30;
   const afterHour = isWeekday && ((h === 15 && m > 30) || (h >= 16 && h < 18));
 
