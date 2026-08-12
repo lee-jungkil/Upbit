@@ -236,6 +236,20 @@ function setMode(mode) {
 function updateSlider(id, labelId, suffix) {
   const val = parseFloat(document.getElementById(id).value);
   document.getElementById(labelId).textContent = val.toFixed(1) + suffix;
+  // ─ 슬라이더 변경 즉시 STATE.config 반영 (저장 버튼 없이도 봇에 적용)
+  if (id === 'profit-target') {
+    STATE.config.profitTarget = val;
+    document.getElementById('profit-target-num').value = val;
+  } else if (id === 'stop-loss') {
+    STATE.config.stopLoss = val;
+    document.getElementById('stop-loss-num').value = val;
+  } else if (id === 'max-positions') {
+    STATE.config.maxPositions = parseInt(val);
+    document.getElementById('max-positions-num').value = parseInt(val);
+    document.getElementById('maxpos-display').textContent = parseInt(val);
+    renderPosSlots();
+  }
+  autoSaveConfig();
   renderStrategyConditions();
 }
 
@@ -244,11 +258,11 @@ function updateCapitalSlider() {
   document.getElementById('paper-capital-val').textContent = val + '00만원';
   document.getElementById('paper-capital-num').value = val;
   STATE.config.paperCapital = val * 1000000;
-  // 자본금 바뀌면 포지션 범위 미리보기 갱신 (강제 리셋 X — 사용자 수동 값 보존)
   applyDefaultPositionRange(STATE.config.paperCapital, false);
+  autoSaveConfig();
 }
 
-// 숫자 입력 → 슬라이더 동기화
+// 숫자 입력 → 슬라이더 동기화 + STATE 즉시 반영
 function syncSliderFromNum(sliderId, numId, labelId, suffix) {
   const num = parseFloat(document.getElementById(numId).value);
   const slider = document.getElementById(sliderId);
@@ -256,6 +270,15 @@ function syncSliderFromNum(sliderId, numId, labelId, suffix) {
   const clamped = Math.min(Math.max(num, min), max);
   slider.value = clamped;
   document.getElementById(labelId).textContent = clamped.toFixed(suffix === '개' ? 0 : 1) + suffix;
+  // STATE.config 즉시 반영
+  if (sliderId === 'profit-target') STATE.config.profitTarget = clamped;
+  else if (sliderId === 'stop-loss')  STATE.config.stopLoss    = clamped;
+  else if (sliderId === 'max-positions') {
+    STATE.config.maxPositions = parseInt(clamped);
+    document.getElementById('maxpos-display').textContent = parseInt(clamped);
+    renderPosSlots();
+  }
+  autoSaveConfig();
 }
 
 function syncCapitalFromNum() {
@@ -263,8 +286,8 @@ function syncCapitalFromNum() {
   document.getElementById('paper-capital').value = val;
   document.getElementById('paper-capital-val').textContent = val + '00만원';
   STATE.config.paperCapital = val * 1000000;
-  // 자본금 바뀌면 포지션 범위 기본값도 미리보기 갱신
   applyDefaultPositionRange(STATE.config.paperCapital, false);
+  autoSaveConfig();
 }
 
 // ─── 포지션 금액 범위 ─────────────────────────────────────────
@@ -354,6 +377,7 @@ function onPosRangeChange() {
   document.getElementById('pos-min-num').value = Math.round(minSlider / 10000);
   document.getElementById('pos-max-num').value = Math.round(maxSlider / 10000);
   refreshPosRangeUI();
+  autoSaveConfig();
 }
 
 /** 만원 숫자 입력(pos-min-num / pos-max-num) 변경 시 */
@@ -368,6 +392,7 @@ function onPosRangeNumChange(which) {
   if (which === 'min') STATE.config.posMinAmt = clamped;
   else                 STATE.config.posMaxAmt = clamped;
   refreshPosRangeUI();
+  autoSaveConfig();
 }
 
 /** 상한율 슬라이더 변경 시 */
@@ -375,6 +400,7 @@ function onPosCapChange() {
   const cap = parseFloat(document.getElementById('pos-cap').value);
   STATE.config.posCapMult = cap;
   refreshPosRangeUI();
+  autoSaveConfig();
 }
 
 /** 기본값 리셋 버튼 */
@@ -442,8 +468,8 @@ function loadConfig() {
   document.getElementById('strategy-select').value    = localStorage.getItem('bot_strategy') || 'scalping';
 
   // 레이블 갱신
-  document.getElementById('profit-val').textContent        = p + '%';
-  document.getElementById('stoploss-val').textContent      = sl + '%';
+  document.getElementById('profit-val').textContent        = parseFloat(p).toFixed(1) + '%';
+  document.getElementById('stoploss-val').textContent      = parseFloat(sl).toFixed(1) + '%';
   document.getElementById('maxpos-val').textContent        = mp + '개';
   document.getElementById('maxpos-display').textContent    = mp;
   document.getElementById('paper-capital-val').textContent = pc + '00만원';
@@ -469,6 +495,13 @@ function loadConfig() {
     applyDefaultPositionRange(STATE.config.paperCapital, false);
     refreshPosRangeUI();
   }
+}
+
+/** 슬라이더 변경 시 STATE → localStorage 자동저장 (로그 없이) */
+function autoSaveConfig() {
+  STATE.config.paperCapital = parseInt(document.getElementById('paper-capital').value) * 1000000 || STATE.config.paperCapital;
+  localStorage.setItem('bot_config', JSON.stringify(STATE.config));
+  localStorage.setItem('bot_strategy', document.getElementById('strategy-select')?.value || STATE.strategy);
 }
 
 function saveConfig() {
