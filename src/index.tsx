@@ -153,19 +153,105 @@ async function naverGetVolumeRank(market: 'KOSPI' | 'KOSDAQ' = 'KOSPI', topN = 2
 // API 라우트
 // ─────────────────────────────────────────────
 
-// ── KIS 토큰 발급 (서버 경유 시도 → 차단 시 상세 에러 반환)
+// ── KIS 프록시: 토큰 발급 (서버→KIS 경유)
+app.post('/api/kis/token', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as any
+  const appKey    = body.appKey    || c.req.header('x-app-key')    || ''
+  const appSecret = body.appSecret || c.req.header('x-app-secret') || ''
+  if (!appKey || !appSecret) return c.json({ error: 'appKey, appSecret 필수' }, 400)
+
+  const result = await getKisToken({ ...c.env } as any, appKey, appSecret)
+  if (!result.token) {
+    return c.json({
+      error: result.error || '토큰 발급 실패',
+      serverBlocked: true,
+      hint: '서버→KIS 연결이 차단된 경우 Cloudflare Pages 배포 후 사용해 주세요',
+    }, 503)
+  }
+  // KV에 캐시 저장 (이미 getKisToken 내부에서 처리됨)
+  return c.json({ ok: true, cached: true })
+})
+
+// ── KIS 프록시: 잔고 조회 (서버→KIS 경유)
+app.post('/api/kis/balance', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as any
+  const { appKey, appSecret, accountNo } = body
+  if (!appKey || !appSecret || !accountNo) {
+    return c.json({ error: 'appKey, appSecret, accountNo 필수' }, 400)
+  }
+  const { token, error } = await getKisToken({ ...c.env } as any, appKey, appSecret)
+  if (!token) return c.json({ error: error || '토큰 발급 실패', serverBlocked: true }, 503)
+
+  try {
+    const [cano, acntPrdtCd] = accountNo.split('-')
+    const url = `https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/trading/inquire-balance?CANO=${cano}&ACNT_PRDT_CD=${acntPrdtCd}&AFHR_FLPR_YN=N&OFL_YN=&INQR_DVSN=02&UNPR_DVSN=01&FUND_STTL_ICLD_YN=N&FNCG_AMT_AUTO_RDPT_YN=N&PRCS_DVSN=00&CTX_AREA_FK100=&CTX_AREA_NK100=`
+    const res = await fetch(url, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        appkey: appKey, appsecret: appSecret,
+        tr_id: 'TTTC8434R', custtype: 'P',
+      },
+      // @ts-ignore
+      signal: AbortSignal.timeout(8000),
+    })
+    const data: any = await res.json()
+    if (data.rt_cd !== '0') return c.json({ error: data.msg1 || JSON.stringify(data) }, 400)
+    return c.json({ ok: true, balance: parseFloat(data?.output2?.[0]?.dnca_tot_amt || '0') })
+  } catch (e: any) {
+    return c.json({ error: e?.message || '잔고 조회 실패', serverBlocked: true }, 503)
+  }
+})
+
+// ── KIS 프록시: 주문 실행 (서버→KIS 경유)
+app.post('/api/kis/order', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as any
+  const { appKey, appSecret, accountNo, ticker, side, qty } = body
+  // side: 'buy' | 'sell'
+  if (!appKey || !appSecret || !accountNo || !ticker || !side || !qty) {
+    return c.json({ error: 'appKey, appSecret, accountNo, ticker, side, qty 필수' }, 400)
+  }
+  const { token, error } = await getKisToken({ ...c.env } as any, appKey, appSecret)
+  if (!token) return c.json({ error: error || '토큰 발급 실패', serverBlocked: true }, 503)
+
+  try {
+    const [cano, acntPrdtCd] = accountNo.split('-')
+    const trId = side === 'buy' ? 'TTTC0802U' : 'TTTC0801U'
+    const res = await fetch('https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/trading/order-cash', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        authorization: `Bearer ${token}`,
+        appkey: appKey, appsecret: appSecret,
+        tr_id: trId, custtype: 'P',
+      },
+      body: JSON.stringify({
+        CANO: cano, ACNT_PRDT_CD: acntPrdtCd,
+        PDNO: ticker, ORD_DVSN: '01', ORD_QTY: String(qty), ORD_UNPR: '0',
+      }),
+      // @ts-ignore
+      signal: AbortSignal.timeout(8000),
+    })
+    const data: any = await res.json()
+    if (data.rt_cd !== '0') return c.json({ error: data.msg1 || JSON.stringify(data) }, 400)
+    return c.json({ ok: true, ordNo: data.output?.odno })
+  } catch (e: any) {
+    return c.json({ error: e?.message || '주문 실패', serverBlocked: true }, 503)
+  }
+})
+
+// ── KIS 토큰 발급 (레거시 경로 — 하위 호환)
 app.post('/api/auth/token', async (c) => {
-  const { appKey, appSecret } = await c.req.json()
+  const { appKey, appSecret } = await c.req.json().catch(() => ({})) as any
   if (!appKey || !appSecret) return c.json({ error: 'appKey, appSecret 필수' }, 400)
   const result = await getKisToken({ ...c.env } as any, appKey, appSecret)
   if (!result.token) {
     return c.json({
       error: result.error || '토큰 발급 실패',
-      hint: '서버에서 KIS API 서버로 연결이 차단된 경우 브라우저 직접 호출 모드를 사용하세요',
       serverBlocked: true,
-    }, 500)
+      hint: 'Cloudflare Pages 배포 후 서버 프록시 모드를 사용해 주세요',
+    }, 503)
   }
-  return c.json({ token: result.token.slice(0, 20) + '...', ok: true })
+  return c.json({ ok: true })
 })
 
 // ── 네이버 금융 프록시: 현재가 (API 키 불필요)
@@ -206,20 +292,9 @@ app.get('/api/stock/volume-rank', async (c) => {
   return c.json(data)
 })
 
-// 잔고 조회 (실전 — 서버 경유 불가 시 에러 반환)
+// 잔고 조회 (레거시 경로 → /api/kis/balance 로 위임)
 app.get('/api/account/balance', async (c) => {
-  return c.json({
-    error: '잔고 조회는 브라우저 직접 호출 방식을 사용합니다',
-    useClientSide: true,
-  }, 501)
-})
-
-// 주문 실행 (실전 — 서버 경유 불가 시 에러 반환)
-app.post('/api/trade/order', async (c) => {
-  return c.json({
-    error: '주문은 브라우저 직접 호출 방식을 사용합니다',
-    useClientSide: true,
-  }, 501)
+  return c.json({ error: '/api/kis/balance POST 를 사용하세요', redirect: '/api/kis/balance' }, 301)
 })
 
 // 인메모리 폴백 스토어 (KV 없을 때)

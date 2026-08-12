@@ -98,67 +98,106 @@ function saveApiKeys() {
 }
 
 /**
- * KIS 직접 토큰 발급 (브라우저 → KIS 서버 직접 호출)
- * 서버 샌드박스에서는 KIS IP가 차단되므로 브라우저에서 직접 호출합니다.
+ * KIS 토큰 발급 — 서버 프록시(/api/kis/token) 경유
+ * ∙ 로컬 샌드박스: 해외 서버 → KIS 연결 차단 → serverBlocked:true 반환
+ * ∙ Cloudflare Pages 배포 후: 엣지 서버 → KIS 정상 연결 기대
  */
-async function kisDirectFetchToken(appKey, appSecret) {
-  const KIS_BASE = 'https://openapi.koreainvestment.com:9443';
-  const res = await fetch(`${KIS_BASE}/oauth2/tokenP`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ grant_type: 'client_credentials', appkey: appKey, appsecret: appSecret }),
-  });
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`KIS HTTP ${res.status}: ${txt.slice(0, 120)}`);
-  }
-  const data = await res.json();
-  if (!data.access_token) throw new Error(data.msg1 || data.message || JSON.stringify(data).slice(0, 120));
-  return data.access_token;
-}
-
-/** KIS 토큰 반환 (캐시 → 직접 발급) */
-async function getKisToken() {
+async function kisGetTokenViaProxy(appKey, appSecret) {
   const cached = sessionStorage.getItem('kis_token_cached');
   const exp    = parseInt(sessionStorage.getItem('kis_token_exp') || '0');
   if (cached && Date.now() < exp) return cached;
-  const token = await kisDirectFetchToken(KEYS.appKey, KEYS.appSecret);
-  sessionStorage.setItem('kis_token_cached', token);
-  sessionStorage.setItem('kis_token_exp', String(Date.now() + 82800 * 1000)); // 23h
-  return token;
+
+  const res = await fetch('/api/kis/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ appKey, appSecret }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.serverBlocked) {
+    // 서버 프록시 차단 → null 반환 (호출자에서 처리)
+    throw Object.assign(new Error(data.error || '서버 프록시 차단'), { serverBlocked: true });
+  }
+  // 프록시 성공 시 클라이언트 캐시에도 저장 (상징적 — 실제 토큰은 서버 KV에 캐시됨)
+  sessionStorage.setItem('kis_token_cached', 'proxy_ok');
+  sessionStorage.setItem('kis_token_exp', String(Date.now() + 82800 * 1000));
+  return 'proxy_ok';  // 토큰 자체는 서버에서 관리
+}
+
+/** KIS 토큰 반환 — 서버 프록시 경유 (캐시 포함) */
+async function getKisToken() {
+  return await kisGetTokenViaProxy(KEYS.appKey, KEYS.appSecret);
 }
 
 async function testApiConnection() {
-  showApiResult('🔄 브라우저에서 KIS 직접 연결 테스트 중...', 'info');
+  showApiResult('🔄 서버 프록시로 KIS 연결 테스트 중...', 'info');
   const k = document.getElementById('input-app-key').value.trim();
   const s = document.getElementById('input-app-secret').value.trim();
   if (!k || k === '●●●●●●●●' || !s || s === '●●●●●●●●') {
-    showApiResult('⚠️ 키를 먼저 입력하세요', 'warn'); return;
+    showApiResult('⚠️ APP KEY와 APP SECRET를 먼저 입력하세요', 'warn'); return;
   }
-  try {
-    // 1단계: KIS 토큰 직접 발급 (브라우저 → KIS)
-    const token = await kisDirectFetchToken(k, s);
-    sessionStorage.setItem('kis_token_cached', token);
-    sessionStorage.setItem('kis_token_exp', String(Date.now() + 82800 * 1000));
-    showApiResult('✅ KIS 연결 성공! 토큰 발급 완료 (브라우저 직접 호출)', 'ok');
-    addLog('info', '✅ KIS API 연결 성공 — 브라우저 직접 호출 모드');
 
-    // 2단계: 네이버 프록시 현재가 테스트
+  // ── 1단계: 네이버 프록시 테스트 (항상 가능) ──
+  try {
     const nr = await axios.get('/api/naver/price/005930', { timeout: 5000 });
     if (nr.data?.ok) {
-      addLog('info', `📊 네이버 시세 연동 OK — 삼성전자 ${nr.data.price?.toLocaleString()}원`);
+      addLog('info', `📊 네이버 시세 연동 ✅ — 삼성전자 ${(nr.data.price||0).toLocaleString()}원`);
     }
   } catch(e) {
-    // CORS 에러인 경우 안내
-    const msg = e.message || String(e);
-    if (msg.includes('CORS') || msg.includes('NetworkError') || msg.includes('Failed to fetch')) {
-      showApiResult('❌ CORS 차단 — KIS Developer 앱 설정에서 접속 IP를 등록하세요', 'error');
-      addLog('error', '❌ KIS CORS 차단: KIS Developer → 앱 설정 → "접속 허용 IP" 또는 "CORS" 항목에 현재 IP 등록 필요');
-    } else {
-      showApiResult('❌ 오류: ' + msg.slice(0, 80), 'error');
-      addLog('error', '❌ KIS 연결 실패: ' + msg);
-    }
+    addLog('warn', '⚠️ 네이버 시세 조회 실패: ' + (e.message||''));
   }
+
+  // ── 2단계: 서버 프록시 → KIS 연결 테스트 ──
+  try {
+    const res = await fetch('/api/kis/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appKey: k, appSecret: s }),
+    });
+    const data = await res.json();
+
+    if (data.ok) {
+      // ✅ 서버 프록시 성공 (Cloudflare 엣지에서 KIS 연결됨)
+      sessionStorage.setItem('kis_token_cached', 'proxy_ok');
+      sessionStorage.setItem('kis_token_exp', String(Date.now() + 82800 * 1000));
+      showApiResult('✅ KIS 연결 성공! 서버 프록시 모드로 실전 거래 가능합니다', 'ok');
+      addLog('info', '✅ KIS 연결 성공 — 서버 프록시 모드 (실전 모드 사용 가능)');
+    } else if (data.serverBlocked) {
+      // ⚠️ 서버→KIS 차단 (로컬 샌드박스 환경)
+      showApiResult('⚠️ 로컬 서버→KIS 연결 차단 — 아래 안내를 확인하세요', 'warn');
+      addLog('warn', '⚠️ 서버→KIS 연결 차단 — 현재 환경 제약');
+      addLog('info', '📄 페이퍼 모드: 정상 이용 가능합니다');
+      addLog('info', '🌐 실전 모드: Cloudflare Pages 배포 후 사용 가능합니다');
+      addLog('info', `   오류 상세: ${data.error || '연결 타임아웃'}`);
+      // 모달에 안내 배너 표시
+      showLiveModeBanner();
+    } else {
+      showApiResult('❌ KIS 인증 실패: ' + (data.error || '알 수 없는 오류').slice(0, 80), 'error');
+      addLog('error', '❌ KIS 인증 실패: ' + (data.error || ''));
+    }
+  } catch(e) {
+    const msg = e.message || String(e);
+    showApiResult('❌ 서버 오류: ' + msg.slice(0, 60), 'error');
+    addLog('error', '❌ 연결 테스트 실패: ' + msg);
+  }
+}
+
+/** 실전 모드 제약 안내 배너를 모달에 표시 */
+function showLiveModeBanner() {
+  let banner = document.getElementById('live-mode-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'live-mode-banner';
+    banner.className = 'bg-yellow-950/60 border border-yellow-700 rounded p-3 text-xs text-yellow-300 space-y-1.5';
+    const modal = document.querySelector('#api-modal .space-y-4');
+    if (modal) modal.appendChild(banner);
+  }
+  banner.innerHTML = `
+    <p class="font-semibold text-yellow-200"><i class="fas fa-exclamation-triangle mr-1"></i>실전 모드 이용 안내</p>
+    <p>• <strong>KIS API는 서버 전용</strong> — 브라우저 직접 호출이 불가합니다 (CORS 정책)</p>
+    <p>• <strong>현재 환경</strong>: 로컬 샌드박스 서버 → KIS 연결이 차단되어 있습니다</p>
+    <p class="pt-1 border-t border-yellow-800">✅ <strong>페이퍼 모드</strong>: 지금 바로 사용 가능 (시뮬레이션)</p>
+    <p>🌐 <strong>실전 모드</strong>: Cloudflare Pages 배포 후 서버 프록시로 이용 가능</p>
+  `;
 }
 
 function showApiResult(msg, type) {
@@ -175,9 +214,16 @@ function setMode(mode) {
   document.getElementById('mode-paper').classList.toggle('active-mode', mode === 'paper');
   document.getElementById('mode-live').classList.toggle('active-mode', mode === 'live');
   document.getElementById('mode-live').classList.toggle('danger', mode === 'live');
-  if (mode === 'live' && !KEYS.appKey) {
-    addLog('warn', '⚠️ 실전 모드: API 키를 먼저 설정하세요');
-    openApiSettings();
+  if (mode === 'live') {
+    if (!KEYS.appKey) {
+      addLog('warn', '⚠️ 실전 모드: API 키를 먼저 설정하세요');
+      openApiSettings();
+    } else {
+      addLog('warn', '🔴 실전 모드 활성화');
+      addLog('info', '   ∙ 시세 조회: 네이버 금융 프록시 (정상)');
+      addLog('info', '   ∙ 주문 실행: 서버 프록시(/api/kis/order) 경유');
+      addLog('info', '   ⚠️ 로컬 환경에서는 주문이 차단될 수 있습니다 — 연결 테스트 먼저 권장');
+    }
   }
   renderStrategyConditions();
 }
@@ -925,24 +971,20 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
 
   if (STATE.mode === 'live') {
     try {
-      const token = await getKisToken();
-      const KIS_BASE = 'https://openapi.koreainvestment.com:9443';
-      const [cano, acntPrdtCd] = KEYS.accountNo.split('-');
-      const res = await fetch(`${KIS_BASE}/uapi/domestic-stock/v1/trading/order-cash`, {
+      const res = await fetch('/api/kis/order', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          authorization: `Bearer ${token}`,
-          appkey: KEYS.appKey, appsecret: KEYS.appSecret,
-          tr_id: 'TTTC0801U', custtype: 'P',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          CANO: cano, ACNT_PRDT_CD: acntPrdtCd,
-          PDNO: pos.ticker, ORD_DVSN: '01', ORD_QTY: String(pos.qty), ORD_UNPR: '0',
+          appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo,
+          ticker: pos.ticker, side: 'sell', qty: pos.qty,
         }),
       });
       const data = await res.json();
-      if (data.rt_cd !== '0') throw new Error(data.msg1 || JSON.stringify(data));
+      if (data.serverBlocked) {
+        addLog('warn', `⚠️ 매도 서버 차단 — 실전 주문 불가. 페이지 배포 후 이용하세요: ${pos.ticker}`);
+        return; // 차단 시 포지션 상태 유지 (임의 청산하지 않음)
+      }
+      if (!data.ok) throw new Error(data.error || JSON.stringify(data));
     } catch(e) {
       addLog('error', `❌ 매도 실패: ${pos.ticker} — ${e.message}`);
     }
@@ -1136,24 +1178,20 @@ async function executeEntry(candidate) {
 
   if (STATE.mode === 'live') {
     try {
-      const token = await getKisToken();
-      const KIS_BASE = 'https://openapi.koreainvestment.com:9443';
-      const [cano, acntPrdtCd] = KEYS.accountNo.split('-');
-      const res = await fetch(`${KIS_BASE}/uapi/domestic-stock/v1/trading/order-cash`, {
+      const res = await fetch('/api/kis/order', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          authorization: `Bearer ${token}`,
-          appkey: KEYS.appKey, appsecret: KEYS.appSecret,
-          tr_id: 'TTTC0802U', custtype: 'P',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          CANO: cano, ACNT_PRDT_CD: acntPrdtCd,
-          PDNO: candidate.ticker, ORD_DVSN: '01', ORD_QTY: String(qty), ORD_UNPR: '0',
+          appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo,
+          ticker: candidate.ticker, side: 'buy', qty,
         }),
       });
       const data = await res.json();
-      if (data.rt_cd !== '0') throw new Error(data.msg1 || JSON.stringify(data));
+      if (data.serverBlocked) {
+        addLog('warn', `⚠️ 매수 서버 차단 — 실전 주문 불가. Cloudflare Pages 배포 후 이용하세요: ${candidate.ticker}`);
+        return;
+      }
+      if (!data.ok) throw new Error(data.error || JSON.stringify(data));
     } catch(e) {
       addLog('error', `❌ 매수 실패: ${candidate.ticker} — ${e.message}`);
       return;
@@ -1217,19 +1255,17 @@ async function fetchCurrentPrice(ticker) {
 async function getLiveBalance() {
   if (!KEYS.appKey || !KEYS.accountNo) return 0;
   try {
-    const token = await getKisToken();
-    const KIS_BASE = 'https://openapi.koreainvestment.com:9443';
-    const [cano, acntPrdtCd] = KEYS.accountNo.split('-');
-    const url = `${KIS_BASE}/uapi/domestic-stock/v1/trading/inquire-balance?CANO=${cano}&ACNT_PRDT_CD=${acntPrdtCd}&AFHR_FLPR_YN=N&OFL_YN=&INQR_DVSN=02&UNPR_DVSN=01&FUND_STTL_ICLD_YN=N&FNCG_AMT_AUTO_RDPT_YN=N&PRCS_DVSN=00&CTX_AREA_FK100=&CTX_AREA_NK100=`;
-    const res = await fetch(url, {
-      headers: {
-        authorization: `Bearer ${token}`,
-        appkey: KEYS.appKey, appsecret: KEYS.appSecret,
-        tr_id: 'TTTC8434R', custtype: 'P',
-      },
+    const res = await fetch('/api/kis/balance', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo }),
     });
     const data = await res.json();
-    return parseFloat(data?.output2?.[0]?.dnca_tot_amt || 0);
+    if (data.serverBlocked) {
+      addLog('warn', '⚠️ 서버→KIS 연결 차단 — 실전 잔고 조회 불가 (Cloudflare Pages 배포 후 사용 가능)');
+      return 0;
+    }
+    return data.balance || 0;
   } catch { return 0; }
 }
 
