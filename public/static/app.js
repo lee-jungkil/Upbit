@@ -156,23 +156,28 @@ async function testApiConnection() {
     const data = await res.json();
 
     if (data.ok) {
-      // ✅ 서버 프록시 성공 (Cloudflare 엣지에서 KIS 연결됨)
+      // ✅ 토큰 발급 성공 — KIS 연결 + 인증 모두 OK
       sessionStorage.setItem('kis_token_cached', 'proxy_ok');
       sessionStorage.setItem('kis_token_exp', String(Date.now() + 82800 * 1000));
-      showApiResult('✅ KIS 연결 성공! 서버 프록시 모드로 실전 거래 가능합니다', 'ok');
+      showApiResult('✅ KIS 연결 성공! 실전 모드로 거래 가능합니다', 'ok');
       addLog('info', '✅ KIS 연결 성공 — 서버 프록시 모드 (실전 모드 사용 가능)');
+    } else if (data.kisReachable) {
+      // ⚠️ KIS 서버에는 연결됐으나 키 인증 실패 (잘못된 키)
+      showApiResult('⚠️ KIS 서버 연결 OK — 키 인증 실패. APP KEY/SECRET을 확인하세요', 'warn');
+      addLog('warn', '⚠️ KIS 서버 연결 성공, 하지만 인증 실패');
+      addLog('warn', `   오류: ${data.error || ''}`);
+      addLog('info', '💡 KIS Developers(apiportal.koreainvestment.com)에서 APP KEY/SECRET을 확인하세요');
+      addLog('info', '   네이버 시세 연동은 정상 — 키 수정 후 다시 테스트하세요');
     } else if (data.serverBlocked) {
-      // ⚠️ 서버→KIS 차단 (로컬 샌드박스 환경)
-      showApiResult('⚠️ 로컬 서버→KIS 연결 차단 — 아래 안내를 확인하세요', 'warn');
-      addLog('warn', '⚠️ 서버→KIS 연결 차단 — 현재 환경 제약');
-      addLog('info', '📄 페이퍼 모드: 정상 이용 가능합니다');
-      addLog('info', '🌐 실전 모드: Cloudflare Pages 배포 후 사용 가능합니다');
-      addLog('info', `   오류 상세: ${data.error || '연결 타임아웃'}`);
-      // 모달에 안내 배너 표시
+      // ⛔ 서버→KIS 네트워크 연결 자체가 안 됨
+      showApiResult('⚠️ 서버→KIS 네트워크 차단 — 아래 안내를 확인하세요', 'warn');
+      addLog('warn', '⚠️ 서버→KIS 네트워크 연결 실패');
+      addLog('info', '📄 페이퍼 모드: 지금 바로 사용 가능합니다');
+      addLog('info', '🌐 실전 모드: 재배포 후 재시도 권장');
       showLiveModeBanner();
     } else {
-      showApiResult('❌ KIS 인증 실패: ' + (data.error || '알 수 없는 오류').slice(0, 80), 'error');
-      addLog('error', '❌ KIS 인증 실패: ' + (data.error || ''));
+      showApiResult('❌ KIS 오류: ' + (data.error || '알 수 없는 오류').slice(0, 80), 'error');
+      addLog('error', '❌ KIS 오류: ' + (data.error || ''));
     }
   } catch(e) {
     const msg = e.message || String(e);

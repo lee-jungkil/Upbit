@@ -21,7 +21,7 @@ app.get('/favicon.ico', (c) => c.redirect('/favicon.svg', 301))
 // ─────────────────────────────────────────────
 // KIS API 헬퍼 (서버→KIS: 샌드박스에서 차단됨 → 에러 상세 반환)
 // ─────────────────────────────────────────────
-async function getKisToken(env: Bindings & Record<string, string>, appKey: string, appSecret: string): Promise<{ token: string; error?: string }> {
+async function getKisToken(env: Bindings & Record<string, string>, appKey: string, appSecret: string): Promise<{ token: string; error?: string; networkError?: boolean }> {
   try {
     const cacheKey = 'kis_token_' + appKey.slice(-8)
     const cached = await env.KV?.get(cacheKey)
@@ -40,7 +40,9 @@ async function getKisToken(env: Bindings & Record<string, string>, appKey: strin
     })
     const data: any = await res.json()
     if (!res.ok || !data.access_token) {
-      return { token: '', error: `KIS 응답 오류: ${data.msg1 || data.message || JSON.stringify(data).slice(0, 100)}` }
+      // KIS 서버에 도달했으나 인증 실패 (잘못된 키 등) → networkError=false
+      const kisMsg = data.error_description || data.msg1 || data.message || JSON.stringify(data).slice(0, 120)
+      return { token: '', error: `KIS 인증 오류: ${kisMsg}`, networkError: false }
     }
     const token = data.access_token
     if (token && env.KV) {
@@ -50,7 +52,7 @@ async function getKisToken(env: Bindings & Record<string, string>, appKey: strin
   } catch (e: any) {
     const msg = e?.message || String(e)
     if (msg.includes('fetch') || msg.includes('connect') || msg.includes('network') || msg.includes('timeout')) {
-      return { token: '', error: '⚠️ 서버→KIS 연결 차단 — 브라우저 직접 호출 모드를 사용하세요' }
+      return { token: '', error: '서버→KIS 네트워크 연결 실패 (타임아웃/차단)', networkError: true }
     }
     return { token: '', error: msg }
   }
@@ -162,14 +164,23 @@ app.post('/api/kis/token', async (c) => {
 
   const result = await getKisToken({ ...c.env } as any, appKey, appSecret)
   if (!result.token) {
+    if (result.networkError) {
+      // 네트워크 차단/타임아웃 — 서버→KIS 연결 자체가 안 됨
+      return c.json({
+        error: result.error || '네트워크 연결 실패',
+        serverBlocked: true,
+        hint: '서버→KIS 네트워크 연결 실패입니다. Cloudflare Pages 배포 후 재시도해 주세요.',
+      }, 503)
+    }
+    // KIS 서버에 도달했으나 인증 실패 (잘못된 키 등)
     return c.json({
-      error: result.error || '토큰 발급 실패',
-      serverBlocked: true,
-      hint: '서버→KIS 연결이 차단된 경우 Cloudflare Pages 배포 후 사용해 주세요',
-    }, 503)
+      error: result.error || 'KIS 인증 실패',
+      serverBlocked: false,
+      kisReachable: true,
+      hint: 'KIS 서버에 정상 연결됐습니다. APP KEY / APP SECRET를 확인하세요.',
+    }, 401)
   }
-  // KV에 캐시 저장 (이미 getKisToken 내부에서 처리됨)
-  return c.json({ ok: true, cached: true })
+  return c.json({ ok: true, kisReachable: true })
 })
 
 // ── KIS 프록시: 잔고 조회 (서버→KIS 경유)
