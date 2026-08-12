@@ -97,23 +97,67 @@ function saveApiKeys() {
   setTimeout(closeApiSettings, 800);
 }
 
+/**
+ * KIS 직접 토큰 발급 (브라우저 → KIS 서버 직접 호출)
+ * 서버 샌드박스에서는 KIS IP가 차단되므로 브라우저에서 직접 호출합니다.
+ */
+async function kisDirectFetchToken(appKey, appSecret) {
+  const KIS_BASE = 'https://openapi.koreainvestment.com:9443';
+  const res = await fetch(`${KIS_BASE}/oauth2/tokenP`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ grant_type: 'client_credentials', appkey: appKey, appsecret: appSecret }),
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`KIS HTTP ${res.status}: ${txt.slice(0, 120)}`);
+  }
+  const data = await res.json();
+  if (!data.access_token) throw new Error(data.msg1 || data.message || JSON.stringify(data).slice(0, 120));
+  return data.access_token;
+}
+
+/** KIS 토큰 반환 (캐시 → 직접 발급) */
+async function getKisToken() {
+  const cached = sessionStorage.getItem('kis_token_cached');
+  const exp    = parseInt(sessionStorage.getItem('kis_token_exp') || '0');
+  if (cached && Date.now() < exp) return cached;
+  const token = await kisDirectFetchToken(KEYS.appKey, KEYS.appSecret);
+  sessionStorage.setItem('kis_token_cached', token);
+  sessionStorage.setItem('kis_token_exp', String(Date.now() + 82800 * 1000)); // 23h
+  return token;
+}
+
 async function testApiConnection() {
-  showApiResult('🔄 연결 테스트 중...', 'info');
+  showApiResult('🔄 브라우저에서 KIS 직접 연결 테스트 중...', 'info');
   const k = document.getElementById('input-app-key').value.trim();
   const s = document.getElementById('input-app-secret').value.trim();
   if (!k || k === '●●●●●●●●' || !s || s === '●●●●●●●●') {
     showApiResult('⚠️ 키를 먼저 입력하세요', 'warn'); return;
   }
   try {
-    const res = await axios.post('/api/auth/token', { appKey: k, appSecret: s });
-    if (res.data.ok) {
-      showApiResult('✅ 연결 성공! 토큰 발급 완료', 'ok');
-      addLog('info', '✅ KIS API 연결 테스트 성공');
-    } else {
-      showApiResult('❌ 연결 실패: ' + (res.data.error || ''), 'error');
+    // 1단계: KIS 토큰 직접 발급 (브라우저 → KIS)
+    const token = await kisDirectFetchToken(k, s);
+    sessionStorage.setItem('kis_token_cached', token);
+    sessionStorage.setItem('kis_token_exp', String(Date.now() + 82800 * 1000));
+    showApiResult('✅ KIS 연결 성공! 토큰 발급 완료 (브라우저 직접 호출)', 'ok');
+    addLog('info', '✅ KIS API 연결 성공 — 브라우저 직접 호출 모드');
+
+    // 2단계: 네이버 프록시 현재가 테스트
+    const nr = await axios.get('/api/naver/price/005930', { timeout: 5000 });
+    if (nr.data?.ok) {
+      addLog('info', `📊 네이버 시세 연동 OK — 삼성전자 ${nr.data.price?.toLocaleString()}원`);
     }
   } catch(e) {
-    showApiResult('❌ 오류: ' + (e.response?.data?.error || e.message), 'error');
+    // CORS 에러인 경우 안내
+    const msg = e.message || String(e);
+    if (msg.includes('CORS') || msg.includes('NetworkError') || msg.includes('Failed to fetch')) {
+      showApiResult('❌ CORS 차단 — KIS Developer 앱 설정에서 접속 IP를 등록하세요', 'error');
+      addLog('error', '❌ KIS CORS 차단: KIS Developer → 앱 설정 → "접속 허용 IP" 또는 "CORS" 항목에 현재 IP 등록 필요');
+    } else {
+      showApiResult('❌ 오류: ' + msg.slice(0, 80), 'error');
+      addLog('error', '❌ KIS 연결 실패: ' + msg);
+    }
   }
 }
 
@@ -881,11 +925,26 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
 
   if (STATE.mode === 'live') {
     try {
-      await axios.post('/api/trade/order', {
-        ticker: pos.ticker, qty: pos.qty, price: pos.currentPrice, side: 'sell', priceType: 'market'
-      }, { headers: apiHeaders() });
+      const token = await getKisToken();
+      const KIS_BASE = 'https://openapi.koreainvestment.com:9443';
+      const [cano, acntPrdtCd] = KEYS.accountNo.split('-');
+      const res = await fetch(`${KIS_BASE}/uapi/domestic-stock/v1/trading/order-cash`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          authorization: `Bearer ${token}`,
+          appkey: KEYS.appKey, appsecret: KEYS.appSecret,
+          tr_id: 'TTTC0801U', custtype: 'P',
+        },
+        body: JSON.stringify({
+          CANO: cano, ACNT_PRDT_CD: acntPrdtCd,
+          PDNO: pos.ticker, ORD_DVSN: '01', ORD_QTY: String(pos.qty), ORD_UNPR: '0',
+        }),
+      });
+      const data = await res.json();
+      if (data.rt_cd !== '0') throw new Error(data.msg1 || JSON.stringify(data));
     } catch(e) {
-      addLog('error', `❌ 매도 API 실패: ${pos.ticker} — ${e.message}`);
+      addLog('error', `❌ 매도 실패: ${pos.ticker} — ${e.message}`);
     }
   } else {
     // 페이퍼: 현금 반환
@@ -950,33 +1009,32 @@ async function scanForEntries() {
 async function generateCandidates() {
   const strategy = document.getElementById('strategy-select').value || STATE.strategy;
 
-  // KIS API가 있으면 거래량 순위에서 가져오기
-  if (KEYS.appKey) {
-    try {
-      const res = await axios.get('/api/stock/volume-rank', { headers: apiHeaders(), timeout: 8000 });
-      const items = res.data?.output || [];
-      const filtered = items.slice(0, 20).filter(item => {
-        const pctChange = parseFloat(item.prdy_ctrt || 0);
-        const vol       = parseFloat(item.acml_vol || 0);
-        if (strategy === 'scalping')       return pctChange > 0.3  && pctChange < 3.0;
-        if (strategy === 'volume')         return vol > 1000000;
-        if (strategy === 'momentum')       return pctChange > 1.0;
-        if (strategy === 'mean_reversion') return pctChange < -1.5;
+  // 네이버 프록시로 거래량 순위 실시간 조회 (API 키 불필요)
+  try {
+    const res = await axios.get('/api/naver/volume-rank?market=KOSPI&top=30', { timeout: 10000 });
+    const stocks = res.data?.stocks || [];
+    if (stocks.length > 0) {
+      const ap = (ADAPTIVE_PARAMS[strategy] || ADAPTIVE_PARAMS.scalping)[STATE.adaptiveMode];
+      const filtered = stocks.filter(item => {
+        const pct = item.changeRate;
+        if (strategy === 'scalping')       return pct > ap.pctMin && pct < ap.pctMax;
+        if (strategy === 'volume')         return pct > 0;
+        if (strategy === 'momentum')       return pct > ap.pctMin;
+        if (strategy === 'mean_reversion') return pct < ap.pctMin;
         return true;
       });
-
-      return filtered.slice(0, 5).map(item => ({
-        ticker:    item.mksc_shrn_iscd,
-        name:      item.hts_kor_isnm || item.mksc_shrn_iscd,
-        price:     parseFloat(item.stck_prpr || 0),
-        pctChange: parseFloat(item.prdy_ctrt || 0),
-        volume:    parseFloat(item.acml_vol || 0),
-        score:     Math.random() * 30 + 70,
+      const result = filtered.slice(0, 5).map(item => ({
+        ticker:    item.code,
+        name:      item.name,
+        price:     item.price,
+        pctChange: item.changeRate,
+        volume:    0,
+        score:     Math.random() * 30 + 60 + ap.scoreBonus,
       }));
-    } catch(e) {
-      addLog('warn', '⚠️ 거래량 순위 조회 실패 — 시뮬레이션 사용');
+      if (result.length > 0) return result;
     }
-  }
+  } catch(e) {
+    addLog('warn', '⚠️ 거래량 순위 조회 실패 — 시뮬레이션 사용');
 
   // API 없거나 실패 시 시뮬레이션 종목
   return generateSimCandidates(strategy);
@@ -1077,11 +1135,26 @@ async function executeEntry(candidate) {
 
   if (STATE.mode === 'live') {
     try {
-      await axios.post('/api/trade/order', {
-        ticker: candidate.ticker, qty, price: candidate.price, side: 'buy', priceType: 'market'
-      }, { headers: apiHeaders() });
+      const token = await getKisToken();
+      const KIS_BASE = 'https://openapi.koreainvestment.com:9443';
+      const [cano, acntPrdtCd] = KEYS.accountNo.split('-');
+      const res = await fetch(`${KIS_BASE}/uapi/domestic-stock/v1/trading/order-cash`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          authorization: `Bearer ${token}`,
+          appkey: KEYS.appKey, appsecret: KEYS.appSecret,
+          tr_id: 'TTTC0802U', custtype: 'P',
+        },
+        body: JSON.stringify({
+          CANO: cano, ACNT_PRDT_CD: acntPrdtCd,
+          PDNO: candidate.ticker, ORD_DVSN: '01', ORD_QTY: String(qty), ORD_UNPR: '0',
+        }),
+      });
+      const data = await res.json();
+      if (data.rt_cd !== '0') throw new Error(data.msg1 || JSON.stringify(data));
     } catch(e) {
-      addLog('error', `❌ 매수 API 실패: ${candidate.ticker} — ${e.message}`);
+      addLog('error', `❌ 매수 실패: ${candidate.ticker} — ${e.message}`);
       return;
     }
   } else {
@@ -1128,8 +1201,9 @@ async function tickPositions() {
 async function fetchCurrentPrice(ticker) {
   if (STATE.mode === 'live' && KEYS.appKey) {
     try {
-      const res = await axios.get(`/api/stock/price/${ticker}`, { headers: apiHeaders(), timeout: 4000 });
-      return parseFloat(res.data?.output?.stck_prpr || 0) || null;
+      // 네이버 프록시로 현재가 조회
+      const res = await axios.get(`/api/naver/price/${ticker}`, { timeout: 4000 });
+      return res.data?.price || null;
     } catch { return null; }
   }
   // 페이퍼: 시뮬레이션 가격 (소폭 랜덤 변동)
@@ -1140,9 +1214,21 @@ async function fetchCurrentPrice(ticker) {
 }
 
 async function getLiveBalance() {
+  if (!KEYS.appKey || !KEYS.accountNo) return 0;
   try {
-    const res = await axios.get('/api/account/balance', { headers: apiHeaders(), timeout: 5000 });
-    return parseFloat(res.data?.output2?.[0]?.dnca_tot_amt || 0);
+    const token = await getKisToken();
+    const KIS_BASE = 'https://openapi.koreainvestment.com:9443';
+    const [cano, acntPrdtCd] = KEYS.accountNo.split('-');
+    const url = `${KIS_BASE}/uapi/domestic-stock/v1/trading/inquire-balance?CANO=${cano}&ACNT_PRDT_CD=${acntPrdtCd}&AFHR_FLPR_YN=N&OFL_YN=&INQR_DVSN=02&UNPR_DVSN=01&FUND_STTL_ICLD_YN=N&FNCG_AMT_AUTO_RDPT_YN=N&PRCS_DVSN=00&CTX_AREA_FK100=&CTX_AREA_NK100=`;
+    const res = await fetch(url, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        appkey: KEYS.appKey, appsecret: KEYS.appSecret,
+        tr_id: 'TTTC8434R', custtype: 'P',
+      },
+    });
+    const data = await res.json();
+    return parseFloat(data?.output2?.[0]?.dnca_tot_amt || 0);
   } catch { return 0; }
 }
 
@@ -1381,59 +1467,55 @@ async function lookupStock() {
   const el = document.getElementById('scanner-result');
   el.innerHTML = '<div class="col-span-full text-gray-500 text-sm text-center py-4">🔄 조회 중...</div>';
 
-  if (KEYS.appKey) {
-    try {
-      const res = await axios.get(`/api/stock/price/${ticker}`, { headers: apiHeaders(), timeout: 5000 });
-      const d = res.data?.output;
-      if (d) {
-        const pct = parseFloat(d.prdy_ctrt || 0);
-        el.innerHTML = `
-          <div class="scanner-card col-span-2">
-            <div class="flex justify-between">
-              <span class="font-medium text-white text-sm">${d.hts_kor_isnm || ticker}</span>
-              <span class="text-xs text-gray-500">${ticker}</span>
-            </div>
-            <div class="text-lg font-bold text-white mt-1">${fmtPrice(parseFloat(d.stck_prpr))}원</div>
-            <div class="${pct >= 0 ? 'text-green-400' : 'text-red-400'} text-sm">${pct >= 0 ? '+' : ''}${pct}%</div>
-            <div class="text-xs text-gray-500 mt-1">거래량 ${fmtVolume(d.acml_vol)}</div>
-          </div>`;
-        addLog('info', `🔍 ${d.hts_kor_isnm || ticker}: ${fmtPrice(parseFloat(d.stck_prpr))}원 (${pct >= 0 ? '+' : ''}${pct}%)`);
-        return;
-      }
-    } catch(e) {
-      addLog('warn', '⚠️ 종목 조회 실패 — ' + e.message);
+  // 네이버 프록시로 실시간 조회 (API 키 불필요)
+  try {
+    const res = await axios.get(`/api/naver/price/${ticker}`, { timeout: 5000 });
+    const d = res.data;
+    if (d?.ok) {
+      const pct = d.changeRate;
+      el.innerHTML = `
+        <div class="scanner-card col-span-2">
+          <div class="flex justify-between">
+            <span class="font-medium text-white text-sm">${d.name || ticker}</span>
+            <span class="text-xs text-gray-500">${ticker} · ${d.market || ''}</span>
+          </div>
+          <div class="text-lg font-bold text-white mt-1">${fmtPrice(d.price)}원</div>
+          <div class="${pct >= 0 ? 'text-green-400' : 'text-red-400'} text-sm">${pct >= 0 ? '+' : ''}${pct}%</div>
+          <div class="text-xs text-gray-500 mt-1">전일 대비 ${d.change >= 0 ? '+' : ''}${fmtPrice(d.change)}원</div>
+        </div>`;
+      addLog('info', `🔍 ${d.name || ticker}: ${fmtPrice(d.price)}원 (${pct >= 0 ? '+' : ''}${pct}%) [네이버 실시간]`);
+      return;
     }
-  } else {
-    addLog('warn', '⚠️ API 키를 설정하면 실시간 조회 가능');
+  } catch(e) {
+    addLog('warn', '⚠️ 종목 조회 실패 — ' + e.message);
   }
-  el.innerHTML = '<div class="col-span-full text-gray-600 text-sm text-center py-4">API 키 설정 후 조회 가능합니다</div>';
+  el.innerHTML = '<div class="col-span-full text-gray-600 text-sm text-center py-4">조회 실패 — 종목코드를 확인하세요</div>';
 }
 
 async function loadVolumeRank() {
   const el = document.getElementById('scanner-result');
   el.innerHTML = '<div class="col-span-full text-gray-500 text-sm text-center py-4">🔄 거래량 상위 조회 중...</div>';
 
-  if (KEYS.appKey) {
-    try {
-      const res = await axios.get('/api/stock/volume-rank', { headers: apiHeaders(), timeout: 8000 });
-      const items = (res.data?.output || []).slice(0, 12);
-      if (items.length > 0) {
-        el.innerHTML = items.map(item => {
-          const pct = parseFloat(item.prdy_ctrt || 0);
-          return `
-          <div class="scanner-card" onclick="document.getElementById('ticker-input').value='${item.mksc_shrn_iscd}'; lookupStock()">
-            <div class="font-medium text-white text-xs truncate">${item.hts_kor_isnm}</div>
-            <div class="text-sm font-bold text-white mt-0.5">${fmtPrice(parseFloat(item.stck_prpr))}원</div>
-            <div class="${pct >= 0 ? 'text-green-400' : 'text-red-400'} text-xs">${pct >= 0 ? '+' : ''}${pct}%</div>
-            <div class="text-xs text-gray-600 mt-0.5">거래량 ${fmtVolume(item.acml_vol)}</div>
-          </div>`;
-        }).join('');
-        addLog('info', `📊 거래량 상위 ${items.length}개 로드 완료`);
-        return;
-      }
-    } catch(e) {
-      addLog('warn', '⚠️ 거래량 순위 조회 실패');
+  // 네이버 프록시로 거래량 순위 조회 (API 키 불필요)
+  try {
+    const res = await axios.get('/api/naver/volume-rank?market=KOSPI&top=20', { timeout: 10000 });
+    const items = (res.data?.stocks || []).slice(0, 12);
+    if (items.length > 0) {
+      el.innerHTML = items.map(item => {
+        const pct = item.changeRate;
+        return `
+        <div class="scanner-card" onclick="document.getElementById('ticker-input').value='${item.code}'; lookupStock()">
+          <div class="font-medium text-white text-xs truncate">${item.name}</div>
+          <div class="text-sm font-bold text-white mt-0.5">${fmtPrice(item.price)}원</div>
+          <div class="${pct >= 0 ? 'text-green-400' : 'text-red-400'} text-xs">${pct >= 0 ? '+' : ''}${pct}%</div>
+          <div class="text-xs text-gray-600 mt-0.5">거래량 상위 ${item.rank}위</div>
+        </div>`;
+      }).join('');
+      addLog('info', `📊 거래량 상위 ${items.length}개 로드 완료 [네이버 실시간]`);
+      return;
     }
+  } catch(e) {
+    addLog('warn', '⚠️ 거래량 순위 조회 실패 — ' + e.message);
   }
 
   // 시뮬레이션 데이터

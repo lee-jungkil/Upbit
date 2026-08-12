@@ -19,13 +19,13 @@ app.get('/favicon.svg', (c) => c.body(
 app.get('/favicon.ico', (c) => c.redirect('/favicon.svg', 301))
 
 // ─────────────────────────────────────────────
-// KIS API 헬퍼
+// KIS API 헬퍼 (서버→KIS: 샌드박스에서 차단됨 → 에러 상세 반환)
 // ─────────────────────────────────────────────
-async function getKisToken(env: Bindings & Record<string, string>, appKey: string, appSecret: string): Promise<string> {
+async function getKisToken(env: Bindings & Record<string, string>, appKey: string, appSecret: string): Promise<{ token: string; error?: string }> {
   try {
     const cacheKey = 'kis_token_' + appKey.slice(-8)
     const cached = await env.KV?.get(cacheKey)
-    if (cached) return cached
+    if (cached) return { token: cached }
 
     const res = await fetch('https://openapi.koreainvestment.com:9443/oauth2/tokenP', {
       method: 'POST',
@@ -35,170 +35,191 @@ async function getKisToken(env: Bindings & Record<string, string>, appKey: strin
         appkey: appKey,
         appsecret: appSecret,
       }),
+      // @ts-ignore
+      signal: AbortSignal.timeout(8000),
     })
     const data: any = await res.json()
+    if (!res.ok || !data.access_token) {
+      return { token: '', error: `KIS 응답 오류: ${data.msg1 || data.message || JSON.stringify(data).slice(0, 100)}` }
+    }
     const token = data.access_token
     if (token && env.KV) {
-      // 토큰 만료 전 23시간 캐시
       await env.KV.put(cacheKey, token, { expirationTtl: 82800 })
     }
-    return token
-  } catch {
-    return ''
+    return { token }
+  } catch (e: any) {
+    const msg = e?.message || String(e)
+    if (msg.includes('fetch') || msg.includes('connect') || msg.includes('network') || msg.includes('timeout')) {
+      return { token: '', error: '⚠️ 서버→KIS 연결 차단 — 브라우저 직접 호출 모드를 사용하세요' }
+    }
+    return { token: '', error: msg }
   }
 }
 
-// 국내 주식 현재가 조회
-async function getStockPrice(token: string, appKey: string, appSecret: string, ticker: string) {
-  const url = `https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price?fid_cond_mrkt_div_code=J&fid_input_iscd=${ticker}`
-  const res = await fetch(url, {
-    headers: {
-      authorization: `Bearer ${token}`,
-      appkey: appKey,
-      appsecret: appSecret,
-      tr_id: 'FHKST01010100',
-      custtype: 'P',
-    },
-  })
-  return res.json()
+// ─────────────────────────────────────────────
+// 네이버 금융 프록시 헬퍼 (서버→네이버: 정상 작동)
+// ─────────────────────────────────────────────
+
+/** 현재가 조회: m.stock.naver.com/api/stock/{code}/basic */
+async function naverGetPrice(code: string) {
+  try {
+    const res = await fetch(`https://m.stock.naver.com/api/stock/${code}/basic`, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      // @ts-ignore
+      signal: AbortSignal.timeout(5000),
+    })
+    if (!res.ok) return { error: `HTTP ${res.status}` }
+    const d: any = await res.json()
+    return {
+      code,
+      name: d.stockName,
+      price: parseFloat(d.closePrice?.replace(/,/g, '') || '0'),
+      change: parseFloat(d.compareToPreviousClosePrice?.replace(/,/g, '') || '0'),
+      changeRate: parseFloat(d.fluctuationsRatio || '0'),
+      market: d.stockExchangeName,
+      ok: true,
+    }
+  } catch (e: any) {
+    return { error: e?.message || 'fetch error', code }
+  }
 }
 
-// 국내 주식 일봉 조회 (최근 30일)
-async function getDayCandles(token: string, appKey: string, appSecret: string, ticker: string) {
-  const today = new Date()
-  const endDate = today.toISOString().slice(0, 10).replace(/-/g, '')
-  const startD = new Date(today); startD.setDate(startD.getDate() - 60)
-  const startDate = startD.toISOString().slice(0, 10).replace(/-/g, '')
-  const url = `https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-daily-price?fid_cond_mrkt_div_code=J&fid_input_iscd=${ticker}&fid_period_div_code=D&fid_org_adj_prc=0&fid_input_date_1=${startDate}&fid_input_date_2=${endDate}`
-  const res = await fetch(url, {
-    headers: {
-      authorization: `Bearer ${token}`,
-      appkey: appKey,
-      appsecret: appSecret,
-      tr_id: 'FHKST01010400',
-      custtype: 'P',
-    },
-  })
-  return res.json()
+/** 일봉 조회: fchart.stock.naver.com XML 파싱 */
+async function naverGetCandles(code: string, count = 30) {
+  try {
+    const res = await fetch(
+      `https://fchart.stock.naver.com/sise.nhn?symbol=${code}&timeframe=day&count=${count}&requestType=0`,
+      {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        // @ts-ignore
+        signal: AbortSignal.timeout(5000),
+      }
+    )
+    if (!res.ok) return { error: `HTTP ${res.status}` }
+    const xml = await res.text()
+    // <item data="20260810|236000|238500|228500|230000|16327805" />
+    const items = [...xml.matchAll(/data="(\d{8})\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)"/g)].map(m => ({
+      date:   m[1],
+      open:   parseInt(m[2]),
+      high:   parseInt(m[3]),
+      low:    parseInt(m[4]),
+      close:  parseInt(m[5]),
+      volume: parseInt(m[6]),
+    }))
+    return { code, candles: items, ok: true }
+  } catch (e: any) {
+    return { error: e?.message || 'fetch error', code }
+  }
 }
 
-// 거래량 순위 (상위 20개)
-async function getVolumeRank(token: string, appKey: string, appSecret: string) {
-  const url = `https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank?fid_cond_mrkt_div_code=J&fid_cond_scr_div_code=20171&fid_input_iscd=0000&fid_div_cls_code=0&fid_blng_cls_code=0&fid_trgt_cls_code=111111111&fid_trgt_exls_cls_code=000000&fid_input_price_1=&fid_input_price_2=&fid_vol_cnt=&fid_input_date_1=0`
-  const res = await fetch(url, {
-    headers: {
-      authorization: `Bearer ${token}`,
-      appkey: appKey,
-      appsecret: appSecret,
-      tr_id: 'FHPST01710000',
-      custtype: 'P',
-    },
-  })
-  return res.json()
-}
+/** 거래량 상위 종목: finance.naver.com HTML 파싱 → 코드 목록 → basic API 조회 */
+async function naverGetVolumeRank(market: 'KOSPI' | 'KOSDAQ' = 'KOSPI', topN = 20) {
+  try {
+    const sosok = market === 'KOSPI' ? '0' : '1'
+    const res = await fetch(
+      `https://finance.naver.com/sise/sise_quant.nhn?sosok=${sosok}`,
+      {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+          'Referer': 'https://finance.naver.com/',
+        },
+        // @ts-ignore
+        signal: AbortSignal.timeout(8000),
+      }
+    )
+    if (!res.ok) return { error: `HTTP ${res.status}` }
+    const html = await res.text()
+    // 6자리 숫자 종목코드 추출 (중복 제거)
+    const codes = [...new Set([...html.matchAll(/code=(\d{6})/g)].map(m => m[1]))].slice(0, topN)
+    if (!codes.length) return { error: '종목 코드 파싱 실패', stocks: [] }
 
-// 잔고 조회
-async function getBalance(token: string, appKey: string, appSecret: string, accountNo: string) {
-  const [cano, acntPrdtCd] = accountNo.split('-')
-  const url = `https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/trading/inquire-balance?CANO=${cano}&ACNT_PRDT_CD=${acntPrdtCd}&AFHR_FLPR_YN=N&OFL_YN=&INQR_DVSN=02&UNPR_DVSN=01&FUND_STTL_ICLD_YN=N&FNCG_AMT_AUTO_RDPT_YN=N&PRCS_DVSN=00&CTX_AREA_FK100=&CTX_AREA_NK100=`
-  const res = await fetch(url, {
-    headers: {
-      authorization: `Bearer ${token}`,
-      appkey: appKey,
-      appsecret: appSecret,
-      tr_id: 'TTTC8434R',
-      custtype: 'P',
-    },
-  })
-  return res.json()
-}
-
-// 주문 (매수/매도)
-async function placeOrder(token: string, appKey: string, appSecret: string, accountNo: string, ticker: string, qty: number, price: number, orderType: 'buy' | 'sell', priceType: 'market' | 'limit') {
-  const [cano, acntPrdtCd] = accountNo.split('-')
-  const trId = orderType === 'buy' ? 'TTTC0802U' : 'TTTC0801U'
-  const ordDvsn = priceType === 'market' ? '01' : '00'
-  const ordPrc = priceType === 'market' ? '0' : String(Math.round(price))
-
-  const res = await fetch('https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/trading/order-cash', {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${token}`,
-      appkey: appKey,
-      appsecret: appSecret,
-      tr_id: trId,
-      custtype: 'P',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      CANO: cano,
-      ACNT_PRDT_CD: acntPrdtCd,
-      PDNO: ticker,
-      ORD_DVSN: ordDvsn,
-      ORD_QTY: String(qty),
-      ORD_UNPR: ordPrc,
-    }),
-  })
-  return res.json()
+    // 상위 N개 현재가 병렬 조회
+    const results = await Promise.all(codes.map(c => naverGetPrice(c)))
+    const stocks = results.filter((r: any) => r.ok).map((r: any, i: number) => ({
+      rank: i + 1,
+      code: r.code,
+      name: r.name,
+      price: r.price,
+      changeRate: r.changeRate,
+      market,
+    }))
+    return { stocks, ok: true }
+  } catch (e: any) {
+    return { error: e?.message || 'fetch error', stocks: [] }
+  }
 }
 
 // ─────────────────────────────────────────────
 // API 라우트
 // ─────────────────────────────────────────────
 
-// 토큰 발급
+// ── KIS 토큰 발급 (서버 경유 시도 → 차단 시 상세 에러 반환)
 app.post('/api/auth/token', async (c) => {
   const { appKey, appSecret } = await c.req.json()
   if (!appKey || !appSecret) return c.json({ error: 'appKey, appSecret 필수' }, 400)
-  const token = await getKisToken({ ...c.env, appKey, appSecret }, appKey, appSecret)
-  if (!token) return c.json({ error: '토큰 발급 실패' }, 500)
-  return c.json({ token: token.slice(0, 20) + '...', ok: true })
+  const result = await getKisToken({ ...c.env } as any, appKey, appSecret)
+  if (!result.token) {
+    return c.json({
+      error: result.error || '토큰 발급 실패',
+      hint: '서버에서 KIS API 서버로 연결이 차단된 경우 브라우저 직접 호출 모드를 사용하세요',
+      serverBlocked: true,
+    }, 500)
+  }
+  return c.json({ token: result.token.slice(0, 20) + '...', ok: true })
 })
 
-// 주식 현재가
+// ── 네이버 금융 프록시: 현재가 (API 키 불필요)
+app.get('/api/naver/price/:code', async (c) => {
+  const data = await naverGetPrice(c.req.param('code'))
+  return c.json(data)
+})
+
+// ── 네이버 금융 프록시: 일봉 차트 (API 키 불필요)
+app.get('/api/naver/candles/:code', async (c) => {
+  const count = parseInt(c.req.query('count') || '30')
+  const data = await naverGetCandles(c.req.param('code'), Math.min(count, 120))
+  return c.json(data)
+})
+
+// ── 네이버 금융 프록시: 거래량 순위 (API 키 불필요)
+app.get('/api/naver/volume-rank', async (c) => {
+  const market = (c.req.query('market') || 'KOSPI') as 'KOSPI' | 'KOSDAQ'
+  const top    = parseInt(c.req.query('top') || '20')
+  const data   = await naverGetVolumeRank(market, Math.min(top, 50))
+  return c.json(data)
+})
+
+// ── 기존 KIS 라우트 유지 (실전 모드 직접 호출 대비 — 서버에서 작동 시)
 app.get('/api/stock/price/:ticker', async (c) => {
-  const { appKey, appSecret } = getApiKeys(c.req.header())
-  if (!appKey) return c.json({ error: 'API 키 필요' }, 401)
-  const token = await getKisToken(c.env as any, appKey, appSecret)
-  const data = await getStockPrice(token, appKey, appSecret, c.req.param('ticker'))
+  // 네이버 프록시로 리다이렉트
+  const data = await naverGetPrice(c.req.param('ticker'))
   return c.json(data)
 })
 
-// 일봉 차트
 app.get('/api/stock/candles/:ticker', async (c) => {
-  const { appKey, appSecret } = getApiKeys(c.req.header())
-  if (!appKey) return c.json({ error: 'API 키 필요' }, 401)
-  const token = await getKisToken(c.env as any, appKey, appSecret)
-  const data = await getDayCandles(token, appKey, appSecret, c.req.param('ticker'))
+  const data = await naverGetCandles(c.req.param('ticker'), 30)
   return c.json(data)
 })
 
-// 거래량 순위
 app.get('/api/stock/volume-rank', async (c) => {
-  const { appKey, appSecret } = getApiKeys(c.req.header())
-  if (!appKey) return c.json({ error: 'API 키 필요' }, 401)
-  const token = await getKisToken(c.env as any, appKey, appSecret)
-  const data = await getVolumeRank(token, appKey, appSecret)
+  const data = await naverGetVolumeRank('KOSPI', 20)
   return c.json(data)
 })
 
-// 잔고 조회
+// 잔고 조회 (실전 — 서버 경유 불가 시 에러 반환)
 app.get('/api/account/balance', async (c) => {
-  const { appKey, appSecret, accountNo } = getApiKeys(c.req.header())
-  if (!appKey || !accountNo) return c.json({ error: 'API 키 및 계좌번호 필요' }, 401)
-  const token = await getKisToken(c.env as any, appKey, appSecret)
-  const data = await getBalance(token, appKey, appSecret, accountNo)
-  return c.json(data)
+  return c.json({
+    error: '잔고 조회는 브라우저 직접 호출 방식을 사용합니다',
+    useClientSide: true,
+  }, 501)
 })
 
-// 주문 실행 (Live)
+// 주문 실행 (실전 — 서버 경유 불가 시 에러 반환)
 app.post('/api/trade/order', async (c) => {
-  const { appKey, appSecret, accountNo } = getApiKeys(c.req.header())
-  if (!appKey || !accountNo) return c.json({ error: 'API 키 및 계좌번호 필요' }, 401)
-  const body = await c.req.json()
-  const token = await getKisToken(c.env as any, appKey, appSecret)
-  const data = await placeOrder(token, appKey, appSecret, accountNo, body.ticker, body.qty, body.price, body.side, body.priceType || 'market')
-  return c.json(data)
+  return c.json({
+    error: '주문은 브라우저 직접 호출 방식을 사용합니다',
+    useClientSide: true,
+  }, 501)
 })
 
 // 인메모리 폴백 스토어 (KV 없을 때)
@@ -240,15 +261,6 @@ app.post('/api/trades', async (c) => {
   await kvPut(c.env.KV, 'trade_history', trimmed)
   return c.json({ ok: true })
 })
-
-// 헬퍼: 헤더에서 API 키 추출
-function getApiKeys(headers: Record<string, string | undefined>) {
-  return {
-    appKey: headers['x-app-key'] || '',
-    appSecret: headers['x-app-secret'] || '',
-    accountNo: headers['x-account-no'] || '',
-  }
-}
 
 function getDefaultState() {
   return {
