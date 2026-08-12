@@ -1035,6 +1035,7 @@ async function generateCandidates() {
     }
   } catch(e) {
     addLog('warn', '⚠️ 거래량 순위 조회 실패 — 시뮬레이션 사용');
+  }
 
   // API 없거나 실패 시 시뮬레이션 종목
   return generateSimCandidates(strategy);
