@@ -3,12 +3,5 @@
   "name": "webapp",
   "compatibility_date": "2026-07-30",
   "pages_build_output_dir": "./dist",
-  "compatibility_flags": ["nodejs_compat"],
-  "kv_namespaces": [
-    {
-      "binding": "KV",
-      "id": "stockbot_kv_local",
-      "preview_id": "stockbot_kv_local"
-    }
-  ]
+  "compatibility_flags": ["nodejs_compat"]
 }
