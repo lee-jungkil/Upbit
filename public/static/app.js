@@ -30,6 +30,10 @@ const STATE = {
   // ── 적응형 진입 조건 ───────────────────────────────────
   adaptiveMode: 1,         // 0=공격 1=기본 2=방어 3=대기
   recentResults: [],       // 최근 10회 거래 결과 [{win:bool, pnlPct}]
+  // ── 실전 잔고 캐시 ─────────────────────────────────────
+  liveBalance: 0,           // 마지막 조회된 실전 현금 잔고
+  liveBalanceTs: 0,         // 마지막 잔고 조회 타임스탬프 (ms)
+  liveBalanceFetching: false, // 잔고 조회 중 여부 (중복 호출 방지)
   // ── 내부 플래그 ────────────────────────────────────────
   _lastMarketClosedLog: 0, // 장 외 안내 로그 마지막 출력 타임스탬프
 };
@@ -228,7 +232,26 @@ function setMode(mode) {
       addLog('info', '   ∙ 시세 조회: 네이버 금융 프록시 (정상)');
       addLog('info', '   ∙ 주문 실행: 서버 프록시(/api/kis/order) 경유');
       addLog('info', '   ⚠️ 로컬 환경에서는 주문이 차단될 수 있습니다 — 연결 테스트 먼저 권장');
+      // ── 실전 전환 즉시 잔고 조회 시작 ─────────────────
+      STATE.liveBalanceTs = 0; // 캐시 무효화 → 다음 tick에서 즉시 조회
+      const cashEl = document.getElementById('stat-cash');
+      if (cashEl) cashEl.textContent = '조회 중…';
+      // 5초 tick 기다리지 않고 즉시 한 번 조회
+      if (KEYS.accountNo && !STATE.liveBalanceFetching) {
+        STATE.liveBalanceFetching = true;
+        getLiveBalance().then(bal => {
+          STATE.liveBalance    = bal;
+          STATE.liveBalanceTs  = Date.now();
+          STATE.liveBalanceFetching = false;
+          if (bal > 0) addLog('info', `💰 실전 잔고 확인: ${fmtPrice(bal)}원`);
+          updateStatsUI();
+        }).catch(() => { STATE.liveBalanceFetching = false; });
+      }
     }
+  } else {
+    // 페이퍼로 전환 시 실전 잔고 캐시 초기화
+    STATE.liveBalance = 0;
+    STATE.liveBalanceTs = 0;
   }
   renderStrategyConditions();
 }
@@ -1183,7 +1206,17 @@ function generateSimCandidates(strategy) {
 
 // 매수 실행
 async function executeEntry(candidate) {
-  const available = STATE.mode === 'paper' ? STATE.paperBalance : await getLiveBalance();
+  let available;
+  if (STATE.mode === 'paper') {
+    available = STATE.paperBalance;
+  } else {
+    available = await getLiveBalance();
+    // 실전: 조회 결과 STATE 캐시에도 반영
+    if (available > 0) {
+      STATE.liveBalance   = available;
+      STATE.liveBalanceTs = Date.now();
+    }
+  }
   if (available < 10000) {
     addLog('warn', `⚠️ 가용 자금 부족: ${fmtPrice(available)}원`);
     return;
@@ -1260,6 +1293,33 @@ async function executeEntry(candidate) {
 
 // ─── 실시간 포지션 가격 업데이트 ──────────────────────────────
 async function tickPositions() {
+  // ── 실전 모드: 30초마다 잔고 자동 폴링 ──────────────────
+  if (STATE.mode === 'live' && KEYS.appKey && KEYS.accountNo) {
+    const elapsed = Date.now() - STATE.liveBalanceTs;
+    if (!STATE.liveBalanceFetching && elapsed > 30000) {
+      STATE.liveBalanceFetching = true;
+      // 첫 조회이거나 갱신 시 "조회 중" 표시
+      if (STATE.liveBalanceTs === 0) {
+        const cashEl = document.getElementById('stat-cash');
+        if (cashEl) cashEl.textContent = '조회 중…';
+      }
+      getLiveBalance().then(bal => {
+        const prev = STATE.liveBalance;
+        STATE.liveBalance    = bal;
+        STATE.liveBalanceTs  = Date.now();
+        STATE.liveBalanceFetching = false;
+        if (bal > 0 && bal !== prev) {
+          addLog('info', `💰 실전 잔고 갱신: ${fmtPrice(bal)}원`);
+          updateStatsUI();
+        } else if (bal === 0 && prev > 0) {
+          updateStatsUI();
+        }
+      }).catch(() => {
+        STATE.liveBalanceFetching = false;
+      });
+    }
+  }
+
   if (STATE.positions.length === 0) return;
 
   for (const pos of STATE.positions) {
@@ -1291,7 +1351,7 @@ async function fetchCurrentPrice(ticker) {
 }
 
 async function getLiveBalance() {
-  if (!KEYS.appKey || !KEYS.accountNo) return 0;
+  if (!KEYS.appKey || !KEYS.accountNo) return STATE.liveBalance; // 키 없으면 캐시 반환
   try {
     const res = await fetch('/api/kis/balance', {
       method: 'POST',
@@ -1301,10 +1361,12 @@ async function getLiveBalance() {
     const data = await res.json();
     if (data.serverBlocked) {
       addLog('warn', '⚠️ 서버→KIS 연결 차단 — 실전 잔고 조회 불가 (Cloudflare Pages 배포 후 사용 가능)');
-      return 0;
+      return STATE.liveBalance; // 캐시 값 유지
     }
     return data.balance || 0;
-  } catch { return 0; }
+  } catch {
+    return STATE.liveBalance; // 네트워크 오류 시 캐시 유지
+  }
 }
 
 // ─── 포지션 UI 렌더링 ─────────────────────────────────────────
@@ -1460,11 +1522,53 @@ function updateStatsUI() {
     barEl.style.width      = Math.min(barPct, 100) + '%';
     barEl.className = 'h-0.5 rounded transition-all duration-500 ' + (assetDiff >= 0 ? 'bg-green-500' : 'bg-red-500');
   } else {
-    document.getElementById('stat-total-asset').textContent = stockVal > 0 ? '평가 ' + fmtPrice(stockVal) + '원' : '계좌 조회 필요';
-    document.getElementById('stat-cash').textContent        = '잔고 조회 필요';
-    document.getElementById('stat-stock-value').textContent = stockVal > 0 ? fmtPrice(stockVal) + '원' : '-';
+    // ── 실전 모드 — 캐시된 잔고 + 보유주식 평가금 합산 표시 ──
+    const cash      = STATE.liveBalance;       // 캐시된 현금 잔고
+    const totalAsset = cash + stockVal;         // 총자산 = 현금 + 주식 평가금
+    const fetching  = STATE.liveBalanceFetching;
+    const hasCash   = cash > 0;
+    const hasStock  = stockVal > 0;
+
+    // 총 자산 표시
+    const assetEl = document.getElementById('stat-total-asset');
+    if (fetching && !hasCash) {
+      assetEl.textContent = '조회 중…';
+      assetEl.className = 'text-2xl font-bold text-yellow-400 tracking-tight';
+    } else if (hasCash || hasStock) {
+      assetEl.textContent = fmtPrice(totalAsset) + '원';
+      assetEl.className = 'text-2xl font-bold text-white tracking-tight';
+    } else {
+      assetEl.textContent = '계좌 연결 필요';
+      assetEl.className = 'text-2xl font-bold text-gray-500 tracking-tight';
+    }
+
+    // 현금 잔고 표시
+    const cashEl = document.getElementById('stat-cash');
+    if (fetching && !hasCash) {
+      cashEl.textContent = '조회 중…';
+    } else if (hasCash) {
+      cashEl.textContent = fmtPrice(cash) + '원';
+    } else {
+      cashEl.textContent = '미연결';
+    }
+
+    // 주식 평가금 표시
+    document.getElementById('stat-stock-value').textContent = hasStock ? fmtPrice(stockVal) + '원' : '-';
+
+    // 배지 + 진행 바 (실전)
     document.getElementById('stat-asset-badge').textContent = '실전';
     document.getElementById('stat-asset-badge').className   = 'text-xs px-1.5 py-0.5 rounded bg-red-900/50 text-red-400';
+
+    // 진행 바 (잔고 대비 주식 비중)
+    const barEl = document.getElementById('stat-asset-bar');
+    if (totalAsset > 0) {
+      const barPct = Math.min((stockVal / totalAsset) * 100, 100);
+      barEl.style.width = barPct + '%';
+      barEl.className = 'h-0.5 rounded transition-all duration-500 bg-red-400';
+    } else {
+      barEl.style.width = '0%';
+      barEl.className = 'h-0.5 rounded transition-all duration-500 bg-gray-600';
+    }
   }
 
   // ── 오늘 손익 카드 ──────────────────────────────────
