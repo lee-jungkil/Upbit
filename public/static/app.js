@@ -1722,21 +1722,34 @@ async function executeEntry(candidate) {
     }
     available = isUs ? (STATE.paperBalanceUsd * STATE.usdKrw) : STATE.paperBalance;
   } else {
-    // ── 실전 모드: tickPositions가 30초마다 캐시 갱신 중 → 캐시값 우선 사용
-    // executeEntry에서 직접 KIS 호출 금지 (토큰 1분 발급 한도 초과 방지)
+    // ── 실전 모드: 캐시 우선, 캐시 없으면 1회 직접 조회 (인플라이트 뮤텍스로 중복 방지)
     if (isUs) {
       const cachedUsd = STATE.liveBalanceUsd;
       const cacheAge  = Date.now() - STATE.liveBalanceUsdTs;
+      const neverFetched = STATE.liveBalanceUsdTs === 0; // 한 번도 조회 안 된 상태
+
       if (cachedUsd > 0 && cacheAge < 120000) {
-        // 캐시 신선 (2분 이내) → 캐시 그대로 사용
+        // 캐시 신선 (2분 이내) → 그대로 사용
         available = cachedUsd * STATE.usdKrw;
-      } else {
-        // 캐시 없거나 오래됨 → tickPositions 캐시 폴백만 사용 (직접 조회 금지)
-        // 이미 tickPositions/getUsLiveBalance에서 인플라이트 조회 중 — 여기서 중복 호출 시 토큰 한도 초과
-        available = cachedUsd > 0 ? cachedUsd * STATE.usdKrw : 0;
-        if (available === 0) {
-          addLog('info', '⏳ 미국 잔고 캐시 갱신 대기 중 — 다음 사이클에 재시도');
+      } else if (neverFetched || (cachedUsd === 0 && STATE.liveBalanceKrwForUs === 0)) {
+        // 최초 실행이거나 달러·원화 둘 다 0 → 직접 1회 조회
+        // getUsLiveBalance 내 인플라이트 뮤텍스가 동시 중복 발급을 차단
+        try {
+          const freshUsd = await getUsLiveBalance();
+          if (freshUsd > 0) {
+            STATE.liveBalanceUsd   = freshUsd;
+            STATE.liveBalanceUsdTs = Date.now();
+            available = freshUsd * STATE.usdKrw;
+          } else {
+            // cashUsd=0이지만 cashKrw는 getUsLiveBalance 내부에서 STATE에 저장됨
+            available = 0;
+          }
+        } catch {
+          available = cachedUsd > 0 ? cachedUsd * STATE.usdKrw : 0;
         }
+      } else {
+        // 캐시 만료됐지만 이전 값 있음 → 폴백 (tickPositions가 곧 갱신)
+        available = cachedUsd > 0 ? cachedUsd * STATE.usdKrw : 0;
       }
       // ── 통합증거금: 달러 잔고=0이어도 원화 가용금액이 있으면 매수 가능
       if (available < 10000 && STATE.liveBalanceKrwForUs > 0) {
