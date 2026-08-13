@@ -1446,7 +1446,9 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
     try {
       if (isUs) {
         // 미국주식 매도
-        const excd = getUsExchangeCode(pos.ticker).replace('NAS','NASD').replace('NYS','NYSE');
+        // pos.excd 우선, 없으면 함수로 추론 → NASD/NYSE 변환
+        const rawExcd = pos.excd || getUsExchangeCode(pos.ticker);
+        const excd = rawExcd.replace('NAS','NASD').replace('NYS','NYSE');
         const res = await fetch('/api/kis/us/order', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1901,7 +1903,9 @@ async function executeEntry(candidate) {
   if (STATE.mode === 'live') {
     try {
       if (isUs) {
-        const excd = getUsExchangeCode(candidate.ticker).replace('NAS','NASD').replace('NYS','NYSE');
+        // candidate.excd(NAS/NYS) 우선, 없으면 함수로 추론 → NASD/NYSE 변환
+        const rawExcd = candidate.excd || getUsExchangeCode(candidate.ticker);
+        const excd = rawExcd.replace('NAS','NASD').replace('NYS','NYSE');
         const res = await fetch('/api/kis/us/order', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

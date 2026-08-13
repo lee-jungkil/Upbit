@@ -519,7 +519,7 @@ app.post('/api/kis/us/balance', async (c) => {
   }
 })
 
-// ── KIS 프록시: 미국주식 주문 (야간 정규장)
+// ── KIS 프록시: 미국주식 주문 (시간대 자동 선택)
 app.post('/api/kis/us/order', async (c) => {
   const body = await c.req.json().catch(() => ({})) as any
   const { appKey, appSecret, accountNo, symbol, excd, side, qty, price } = body
@@ -534,8 +534,27 @@ app.post('/api/kis/us/order', async (c) => {
   try {
     const [cano, acntPrdtCd] = accountNo.split('-')
     const exchCd = (excd || 'NASD').toUpperCase()
-    // 야간 정규장 tr_id: 매수=TTTS0308U, 매도=TTTS0307U
-    const trId = side === 'buy' ? 'TTTS0308U' : 'TTTS0307U'
+
+    // ── tr_id: 시간대(주간/야간) × 거래소(NASD/NYSE) × 매수/매도 자동 선택 ──
+    // 한국시간 기준: 22:30~06:00 = 야간장, 그 외 = 주간장
+    const nowKst = new Date(Date.now() + 9 * 3600 * 1000)
+    const hhmm = nowKst.getUTCHours() * 100 + nowKst.getUTCMinutes()
+    const isNight = hhmm >= 2230 || hhmm < 600  // 야간: 22:30~06:00
+
+    let trId: string
+    if (isNight) {
+      // 야간: NASD=TTTS0308U(매수)/TTTS0307U(매도), NYSE=TTTS0305U(매수)/TTTS0304U(매도)
+      if (exchCd === 'NYSE' || exchCd === 'NYS') {
+        trId = side === 'buy' ? 'TTTS0305U' : 'TTTS0304U'
+      } else {
+        // NASD (나스닥, AMEX 포함)
+        trId = side === 'buy' ? 'TTTS0308U' : 'TTTS0307U'
+      }
+    } else {
+      // 주간(한국 10:00~18:00 미국 주간거래): 매수=JTTT1002U, 매도=JTTT1006U (거래소 무관)
+      trId = side === 'buy' ? 'JTTT1002U' : 'JTTT1006U'
+    }
+
     const res = await fetch('https://openapi.koreainvestment.com:9443/uapi/overseas-stock/v1/trading/order', {
       method: 'POST',
       headers: {
@@ -557,8 +576,8 @@ app.post('/api/kis/us/order', async (c) => {
       signal: AbortSignal.timeout(8000),
     })
     const data: any = await res.json()
-    if (data.rt_cd !== '0') return c.json({ error: data.msg1 || JSON.stringify(data) }, 400)
-    return c.json({ ok: true, ordNo: data.output?.odno })
+    if (data.rt_cd !== '0') return c.json({ error: data.msg1 || JSON.stringify(data), trId, exchCd }, 400)
+    return c.json({ ok: true, ordNo: data.output?.odno, trId })
   } catch (e: any) {
     return c.json({ error: e?.message || '미국주식 주문 실패', serverBlocked: true }, 503)
   }
