@@ -741,7 +741,7 @@ app.get('/', (c) => {
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/axios@1.6.0/dist/axios.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=26">
+  <link rel="stylesheet" href="/static/style.css?v=t1786636992">
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen">
 
@@ -1242,7 +1242,7 @@ app.get('/', (c) => {
   </div>
 </div>
 
-<script src="/static/app.js?v=26"></script>
+<script src="/static/app.js?v=t1786636992"></script>
 </body>
 </html>`)
 })
