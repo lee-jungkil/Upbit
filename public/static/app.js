@@ -444,10 +444,23 @@ function setMarket(market) {
     addLog('info', '   ∙ 달러 지정가로 주문, 잔고는 달러 표시');
     // 미국 잔고 즉시 조회
     if (STATE.mode === 'live') triggerUsdBalanceFetch();
+    // 페이퍼 모드에서 US로 전환 시 달러 잔고 초기화
+    if (STATE.mode === 'paper' && STATE.config.paperCapital > 0) {
+      STATE.paperBalanceUsd = STATE.config.paperCapital / STATE.usdKrw;
+      STATE.paperBalance = 0;
+      addLog('info', `💵 페이퍼 달러 잔고 초기화: $${STATE.paperBalanceUsd.toFixed(2)}`);
+    }
   } else if (market === 'BOTH') {
     addLog('info', '🌏 국내+미국 동시 모드');
     addLog('info', `   ∙ 자본 배분: 미국 ${Math.round(STATE.config.usRatio * 100)}% / 국내 ${Math.round((1-STATE.config.usRatio)*100)}%`);
     if (STATE.mode === 'live') triggerUsdBalanceFetch();
+    // 페이퍼 모드에서 BOTH로 전환 시 달러 잔고 재배분
+    if (STATE.mode === 'paper' && STATE.config.paperCapital > 0) {
+      const usdPart = STATE.config.paperCapital * STATE.config.usRatio;
+      STATE.paperBalanceUsd = usdPart / STATE.usdKrw;
+      STATE.paperBalance = STATE.config.paperCapital * (1 - STATE.config.usRatio);
+      addLog('info', `💵 페이퍼 자본 재배분: 국내 ${fmtManwon(STATE.paperBalance)} / 미국 $${STATE.paperBalanceUsd.toFixed(2)}`);
+    }
   }
 
   // 환율 패널 표시 여부
@@ -1054,6 +1067,9 @@ async function startBot() {
       STATE.paperBalanceUsd = usdPart / STATE.usdKrw;
       STATE.paperBalance = STATE.config.paperCapital * (1 - STATE.config.usRatio);
       addLog('info', `🌏 페이퍼 자본 배분: 국내 ${fmtManwon(STATE.paperBalance)} / 미국 $${STATE.paperBalanceUsd.toFixed(2)}`);
+    } else {
+      // KR 모드: 달러 잔고 불필요
+      STATE.paperBalanceUsd = 0;
     }
   }
 
@@ -1684,6 +1700,12 @@ async function executeEntry(candidate) {
   // ── 가용 자금 조회 ─────────────────────────────────────
   let available;
   if (STATE.mode === 'paper') {
+    // 페이퍼 BOTH 모드에서 봇 시작 전 시장 전환 등으로 달러 잔고가 초기화 안 됐을 때 자동 복구
+    if (isUs && STATE.paperBalanceUsd <= 0 && STATE.config.paperCapital > 0) {
+      const usdRatio = STATE.market === 'BOTH' ? STATE.config.usRatio : 1.0;
+      STATE.paperBalanceUsd = (STATE.config.paperCapital * usdRatio) / STATE.usdKrw;
+      addLog('info', `💵 페이퍼 달러 잔고 자동 초기화: $${STATE.paperBalanceUsd.toFixed(2)}`);
+    }
     available = isUs ? (STATE.paperBalanceUsd * STATE.usdKrw) : STATE.paperBalance;
   } else {
     if (isUs) {
@@ -1695,7 +1717,9 @@ async function executeEntry(candidate) {
     }
   }
   if (available < 10000) {
-    addLog('warn', `⚠️ 가용 자금 부족: ${isUs ? '$'+(available/STATE.usdKrw).toFixed(0) : fmtPrice(available)+'원'}`);
+    // isUs: available은 이미 원화 환산값이므로 달러로 되돌려 표시
+    const dispStr = isUs ? `$${(available / STATE.usdKrw).toFixed(2)}` : `${fmtPrice(available)}원`;
+    addLog('warn', `⚠️ 가용 자금 부족: ${dispStr}`);
     return;
   }
 
