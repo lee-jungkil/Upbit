@@ -1880,17 +1880,24 @@ async function getLiveBalance() {
     });
     const data = await res.json();
     if (data.serverBlocked) {
-      addLog('warn', '⚠️ 서버→KIS 연결 차단 — 잔고 조회 불가 (배포 후 이용 가능)');
-      // serverBlocked도 "조회 시도 완료"로 처리 — "계좌 연결 필요" 오표시 방지
+      addLog('warn', '⚠️ 서버→KIS 연결 차단 — 잔고 조회 불가');
       STATE.liveBalanceTs = Date.now();
       return STATE.liveBalance;
     }
-    if (!res.ok || data.error) {
-      addLog('warn', '⚠️ 잔고 조회 응답 오류: ' + (data.error || res.status));
+    if (data.ok && typeof data.balance === 'number') {
+      // ✅ 정상 응답
+      return data.balance;
+    }
+    if (data.error) {
+      // KIS API 레벨 오류 (rt_cd 오류 등) — serverBlocked 아님
+      const hint = data.rtCd ? ` [rt_cd=${data.rtCd}]` : '';
+      addLog('warn', `⚠️ 잔고 조회 오류${hint}: ${data.error}`);
+      if (data.rtCd === '1') addLog('info', '💡 토큰 만료 가능성 — 잠시 후 자동 재시도합니다');
       STATE.liveBalanceTs = Date.now();
       return STATE.liveBalance;
     }
-    return data.balance || 0;
+    STATE.liveBalanceTs = Date.now();
+    return STATE.liveBalance;
   } catch (e) {
     addLog('warn', '⚠️ 잔고 조회 네트워크 오류: ' + (e?.message || ''));
     STATE.liveBalanceTs = Date.now();
@@ -1909,17 +1916,23 @@ async function getUsLiveBalance() {
     });
     const data = await res.json();
     if (data.serverBlocked) {
-      addLog('warn', '⚠️ 서버→KIS 연결 차단 — 미국주식 잔고 조회 불가 (배포 후 이용 가능)');
-      // serverBlocked도 "조회 시도 완료"로 처리
+      addLog('warn', '⚠️ 서버→KIS 연결 차단 — 미국주식 잔고 조회 불가');
       STATE.liveBalanceUsdTs = Date.now();
       return STATE.liveBalanceUsd;
     }
-    if (!res.ok || data.error) {
-      addLog('warn', '⚠️ 미국주식 잔고 응답 오류: ' + (data.error || res.status));
+    if (data.ok && typeof data.cashUsd === 'number') {
+      // ✅ 정상 응답
+      return data.cashUsd;
+    }
+    if (data.error) {
+      const hint = data.rtCd ? ` [rt_cd=${data.rtCd}]` : '';
+      addLog('warn', `⚠️ 미국주식 잔고 오류${hint}: ${data.error}`);
+      if (data.rtCd === '1') addLog('info', '💡 토큰 만료 — 잠시 후 자동 재시도합니다');
       STATE.liveBalanceUsdTs = Date.now();
       return STATE.liveBalanceUsd;
     }
-    return data.cashUsd || 0;
+    STATE.liveBalanceUsdTs = Date.now();
+    return STATE.liveBalanceUsd;
   } catch (e) {
     addLog('warn', '⚠️ 미국주식 잔고 네트워크 오류: ' + (e?.message || ''));
     STATE.liveBalanceUsdTs = Date.now();

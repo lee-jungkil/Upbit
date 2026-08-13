@@ -21,11 +21,31 @@ app.get('/favicon.ico', (c) => c.redirect('/favicon.svg', 301))
 // ─────────────────────────────────────────────
 // KIS API 헬퍼 (서버→KIS: 샌드박스에서 차단됨 → 에러 상세 반환)
 // ─────────────────────────────────────────────
+
+// ── 인메모리 토큰 캐시 (KV 없을 때 폴백 — Worker 인스턴스 생명주기 동안 유지)
+const _tokenCache: Map<string, { token: string; exp: number }> = new Map()
+
+/** 토큰 캐시 무효화 (rt_cd='1' 토큰 만료 시 호출) */
+function invalidateKisToken(appKey: string) {
+  const cacheKey = 'kis_token_' + appKey.slice(-8)
+  _tokenCache.delete(cacheKey)
+}
+
 async function getKisToken(env: Bindings & Record<string, string>, appKey: string, appSecret: string): Promise<{ token: string; error?: string; networkError?: boolean }> {
   try {
     const cacheKey = 'kis_token_' + appKey.slice(-8)
-    const cached = await env.KV?.get(cacheKey)
-    if (cached) return { token: cached }
+
+    // 1) KV 캐시 조회
+    if (env.KV) {
+      const cached = await env.KV.get(cacheKey)
+      if (cached) return { token: cached }
+    }
+
+    // 2) 인메모리 캐시 조회 (KV 없을 때 폴백 — 토큰 재발급 횟수 제한 방지)
+    const memCached = _tokenCache.get(cacheKey)
+    if (memCached && Date.now() < memCached.exp) {
+      return { token: memCached.token }
+    }
 
     const res = await fetch('https://openapi.koreainvestment.com:9443/oauth2/tokenP', {
       method: 'POST',
@@ -45,9 +65,14 @@ async function getKisToken(env: Bindings & Record<string, string>, appKey: strin
       return { token: '', error: `KIS 인증 오류: ${kisMsg}`, networkError: false }
     }
     const token = data.access_token
-    if (token && env.KV) {
+
+    // 3) KV에 저장 (있으면)
+    if (env.KV) {
       await env.KV.put(cacheKey, token, { expirationTtl: 82800 })
     }
+    // 4) 인메모리에도 저장 (KV 없을 때 폴백 — 22.5시간 TTL)
+    _tokenCache.set(cacheKey, { token, exp: Date.now() + 82800 * 1000 })
+
     return { token }
   } catch (e: any) {
     const msg = e?.message || String(e)
@@ -190,10 +215,12 @@ app.post('/api/kis/balance', async (c) => {
   if (!appKey || !appSecret || !accountNo) {
     return c.json({ error: 'appKey, appSecret, accountNo 필수' }, 400)
   }
-  const { token, error } = await getKisToken({ ...c.env } as any, appKey, appSecret)
-  if (!token) return c.json({ error: error || '토큰 발급 실패', serverBlocked: true }, 503)
 
-  try {
+  // 토큰 취득 (최대 2회 시도: 만료 시 캐시 무효화 후 재발급)
+  async function fetchBalance(retrying = false): Promise<Response> {
+    const { token, error: tokErr } = await getKisToken({ ...c.env } as any, appKey, appSecret)
+    if (!token) return c.json({ error: tokErr || '토큰 발급 실패', serverBlocked: true }, 503)
+
     const [cano, acntPrdtCd] = accountNo.split('-')
     const url = `https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/trading/inquire-balance?CANO=${cano}&ACNT_PRDT_CD=${acntPrdtCd}&AFHR_FLPR_YN=N&OFL_YN=&INQR_DVSN=02&UNPR_DVSN=01&FUND_STTL_ICLD_YN=N&FNCG_AMT_AUTO_RDPT_YN=N&PRCS_DVSN=00&CTX_AREA_FK100=&CTX_AREA_NK100=`
     const res = await fetch(url, {
@@ -206,8 +233,28 @@ app.post('/api/kis/balance', async (c) => {
       signal: AbortSignal.timeout(8000),
     })
     const data: any = await res.json()
-    if (data.rt_cd !== '0') return c.json({ error: data.msg1 || JSON.stringify(data) }, 400)
-    return c.json({ ok: true, balance: parseFloat(data?.output2?.[0]?.dnca_tot_amt || '0') })
+    if (data.rt_cd !== '0') {
+      // rt_cd='1': 토큰 만료 → 캐시 무효화 후 1회 재시도
+      if (data.rt_cd === '1' && !retrying) {
+        invalidateKisToken(appKey)
+        if (c.env.KV) await c.env.KV.delete('kis_token_' + appKey.slice(-8)).catch(() => {})
+        return fetchBalance(true)
+      }
+      const errMsg = data.msg1 || data.msg2 || JSON.stringify(data).slice(0, 200)
+      const rtCd = data.rt_cd || 'unknown'
+      return c.json({
+        error: errMsg,
+        rtCd,
+        serverBlocked: false,
+        hint: rtCd === '1' ? '토큰 만료 — 재발급 실패. 잠시 후 재시도' : `KIS 응답코드 ${rtCd}`,
+      }, 400)
+    }
+    const balance = parseFloat(data?.output2?.[0]?.dnca_tot_amt || '0')
+    return c.json({ ok: true, balance })
+  }
+
+  try {
+    return await fetchBalance()
   } catch (e: any) {
     return c.json({ error: e?.message || '잔고 조회 실패', serverBlocked: true }, 503)
   }
@@ -300,13 +347,13 @@ app.post('/api/kis/us/balance', async (c) => {
   if (!appKey || !appSecret || !accountNo) {
     return c.json({ error: 'appKey, appSecret, accountNo 필수' }, 400)
   }
-  const { token, error, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret)
-  if (!token) {
-    return c.json({ error: error || '토큰 실패', serverBlocked: !!networkError }, networkError ? 503 : 401)
-  }
-  try {
+
+  async function fetchUsBalance(retrying = false): Promise<Response> {
+    const { token, error: tokErr, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret)
+    if (!token) {
+      return c.json({ error: tokErr || '토큰 실패', serverBlocked: !!networkError }, networkError ? 503 : 401)
+    }
     const [cano, acntPrdtCd] = accountNo.split('-')
-    // 해외주식 잔고 조회 API
     const url = `https://openapi.koreainvestment.com:9443/uapi/overseas-stock/v1/trading/inquire-balance?CANO=${cano}&ACNT_PRDT_CD=${acntPrdtCd}&OVRS_EXCG_CD=NASD&TR_CRCY_CD=USD&CTX_AREA_FK200=&CTX_AREA_NK200=`
     const res = await fetch(url, {
       headers: {
@@ -318,14 +365,25 @@ app.post('/api/kis/us/balance', async (c) => {
       signal: AbortSignal.timeout(8000),
     })
     const data: any = await res.json()
-    if (data.rt_cd !== '0') return c.json({ error: data.msg1 || JSON.stringify(data) }, 400)
-    // output2[0].frcr_pchs_amt1 = 외화 매입금액, tot_evlu_pfls_amt = 총평가손익
+    if (data.rt_cd !== '0') {
+      // rt_cd='1': 토큰 만료 → 캐시 무효화 후 1회 재시도
+      if (data.rt_cd === '1' && !retrying) {
+        invalidateKisToken(appKey)
+        if (c.env.KV) await c.env.KV.delete('kis_token_' + appKey.slice(-8)).catch(() => {})
+        return fetchUsBalance(true)
+      }
+      const errMsg = data.msg1 || data.msg2 || JSON.stringify(data).slice(0, 200)
+      const rtCd = data.rt_cd || 'unknown'
+      return c.json({ error: errMsg, rtCd, serverBlocked: false, hint: `미국주식 잔고 KIS 응답코드 ${rtCd}` }, 400)
+    }
+    // output2[0]: 달러 잔고 필드 (여러 필드명 시도)
     const out2 = data.output2?.[0] || {}
-    return c.json({
-      ok: true,
-      cashUsd: parseFloat(out2.frcr_dncl_amt_2 || out2.frcr_evlu_amt || '0'), // 달러 현금
-      totalUsd: parseFloat(out2.tot_evlu_amt || '0'),  // 달러 총평가
-    })
+    const cashUsd = parseFloat(out2.frcr_dncl_amt_2 || out2.frcr_evlu_amt || out2.ovrs_cblc_amt || '0')
+    return c.json({ ok: true, cashUsd, totalUsd: parseFloat(out2.tot_evlu_amt || '0') })
+  }
+
+  try {
+    return await fetchUsBalance()
   } catch (e: any) {
     return c.json({ error: e?.message || '미국주식 잔고 조회 실패', serverBlocked: true }, 503)
   }
