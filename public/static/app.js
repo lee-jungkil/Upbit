@@ -164,10 +164,12 @@ function saveApiKeys() {
   if (s.length < 10) { showApiResult('⚠️ APP SECRET가 너무 짧습니다 (복사 오류 확인)', 'warn'); return; }
 
   KEYS.save(k, s, a);
-  showApiResult(`✅ 저장 완료 — KEY: ${k.slice(0,4)}...${k.slice(-4)} (${k.length}자)`, 'ok');
-  addLog('info', `🔑 API 키 저장 완료 — APP KEY ${k.slice(0,4)}...${k.slice(-4)} (${k.length}자)`);
-  // 실전 모드 상태면 즉시 잔고 재조회
-  if (STATE.mode === 'live' && a) {
+  showApiResult(`✅ 저장 완료 — KEY: ${k.slice(0,4)}...${k.slice(-4)} (${k.length}자) | 계좌: ${a || '미입력'}`, 'ok');
+  addLog('info', `🔑 API 키 저장 완료 — APP KEY ${k.slice(0,4)}...${k.slice(-4)} (${k.length}자) | 계좌 ${a || '없음'}`);
+
+  // 계좌번호가 있으면 실전/페이퍼 무관하게 즉시 잔고 조회
+  // (계좌 변경 여부 확인 + 실전 모드 전환 시 즉시 반영)
+  if (a) {
     setTimeout(() => {
       STATE.liveBalanceTs = 0;
       STATE.liveBalanceFetching = true;
@@ -177,6 +179,7 @@ function saveApiKeys() {
         STATE.liveBalanceTs = Date.now();
         STATE.liveBalanceFetching = false;
         if (bal > 0) addLog('info', `💰 잔고 확인: ${fmtPrice(bal)}원`);
+        else addLog('info', '💰 잔고 조회 완료 (주문 가능 현금 없음)');
         updateStatsUI();
       }).catch(() => {
         STATE.liveBalanceFetching = false;
@@ -273,11 +276,11 @@ async function testApiConnection() {
       showApiResult('✅ KIS 연결 성공! 저장 버튼을 눌러 키를 저장하세요', 'ok');
       addLog('info', '✅ KIS 연결 성공 — 서버 프록시 모드 (실전 모드 사용 가능)');
 
-      // 실전 모드 + 계좌번호 있으면 즉시 잔고 조회 (저장 전이라도 현재 입력된 계좌번호로 조회)
+      // 계좌번호 있으면 실전/페이퍼 무관하게 즉시 잔고 조회 (계좌 유효성 확인 + UI 갱신)
       const aInput = document.getElementById('input-account-no').value.trim();
       const a = aInput || KEYS.accountNo; // 빈칸이면 저장된 계좌번호 폴백
-      if (STATE.mode === 'live' && a) {
-        // 현재 입력된 키/계좌로 임시 조회 (저장 여부와 무관)
+      if (a) {
+        // 현재 입력된 키/계좌로 즉시 조회 (저장 여부와 무관)
         setTimeout(async () => {
           STATE.liveBalanceTs = 0;
           STATE.liveBalanceFetching = true;
@@ -296,6 +299,7 @@ async function testApiConnection() {
               else addLog('info', '💰 잔고 조회 완료 (주문 가능 현금 없음)');
             } else {
               STATE.liveBalanceTs = Date.now();
+              if (balData.error) addLog('warn', `⚠️ 잔고 조회 실패: ${balData.error}`);
             }
           } catch {
             STATE.liveBalanceTs = Date.now();
