@@ -107,7 +107,10 @@ window.addEventListener('DOMContentLoaded', async () => {
       STATE.liveBalance    = bal;
       STATE.liveBalanceTs  = Date.now();
       STATE.liveBalanceFetching = false;
-      if (bal > 0) addLog('info', `💰 잔고 복원: ${fmtPrice(bal)}원`);
+      // 통합증거금: 국내 원화 잔고 = 미국주식 가용 원화 (수동 입력이 없을 때만 자동 동기화)
+      if (bal > 0 && STATE.liveBalanceKrwForUs === 0) STATE.liveBalanceKrwForUs = bal;
+      else if (bal > 0) STATE.liveBalanceKrwForUs = bal; // 항상 최신값으로 갱신
+      if (bal > 0) addLog('info', `💰 잔고 복원: ${fmtPrice(bal)}원 (통합증거금 — 미국주식 가용)`);
       updateStatsUI();
     }).catch(() => {
       STATE.liveBalanceFetching = false;
@@ -211,7 +214,8 @@ function saveApiKeys() {
         STATE.liveBalance = bal;
         STATE.liveBalanceTs = Date.now();
         STATE.liveBalanceFetching = false;
-        if (bal > 0) addLog('info', `💰 잔고 확인: ${fmtPrice(bal)}원`);
+        if (bal > 0) STATE.liveBalanceKrwForUs = bal; // 통합증거금 자동 동기화
+        if (bal > 0) addLog('info', `💰 잔고 확인: ${fmtPrice(bal)}원 (통합증거금 — 미국주식 가용)`);
         else addLog('info', '💰 잔고 조회 완료 (주문 가능 현금 없음)');
         updateStatsUI();
       }).catch(() => {
@@ -328,7 +332,8 @@ async function testApiConnection() {
             if (balData.ok && typeof balData.balance === 'number') {
               STATE.liveBalance = balData.balance;
               STATE.liveBalanceTs = Date.now();
-              if (balData.balance > 0) addLog('info', `💰 실전 잔고: ${fmtPrice(balData.balance)}원`);
+              if (balData.balance > 0) STATE.liveBalanceKrwForUs = balData.balance; // 통합증거금 자동 동기화
+              if (balData.balance > 0) addLog('info', `💰 실전 잔고: ${fmtPrice(balData.balance)}원 (통합증거금 — 미국주식 가용)`);
               else addLog('info', '💰 잔고 조회 완료 (주문 가능 현금 없음)');
             } else {
               STATE.liveBalanceTs = Date.now();
@@ -427,7 +432,8 @@ function setMode(mode) {
           STATE.liveBalance    = bal;
           STATE.liveBalanceTs  = Date.now();
           STATE.liveBalanceFetching = false;
-          if (bal > 0) addLog('info', `💰 실전 잔고 확인: ${fmtPrice(bal)}원`);
+          if (bal > 0) STATE.liveBalanceKrwForUs = bal; // 통합증거금 자동 동기화
+          if (bal > 0) addLog('info', `💰 실전 잔고 확인: ${fmtPrice(bal)}원 (통합증거금 — 미국주식 가용)`);
           else addLog('info', '💰 잔고 조회 완료 (주문 가능 현금 없음 — KIS 앱 확인 권장)');
           updateStatsUI();
         }).catch((e) => {
@@ -1817,9 +1823,14 @@ async function executeEntry(candidate) {
         available = cachedUsd > 0 ? cachedUsd * STATE.usdKrw : 0;
       }
       // ── 통합증거금: 달러 잔고=0이어도 원화 가용금액이 있으면 매수 가능
-      if (available < 10000 && STATE.liveBalanceKrwForUs > 0) {
-        available = STATE.liveBalanceKrwForUs;
-        addLog('info', `💴 통합증거금 원화 잔고로 매수: ${fmtPrice(available)}원`);
+      // liveBalanceKrwForUs 없으면 liveBalance(국내 원화)를 통합증거금으로 간주
+      if (available < 10000) {
+        const krwFallback = STATE.liveBalanceKrwForUs || STATE.liveBalance;
+        if (krwFallback > 0) {
+          available = krwFallback;
+          if (STATE.liveBalanceKrwForUs === 0) STATE.liveBalanceKrwForUs = krwFallback; // 동기화
+          addLog('info', `💴 통합증거금 원화 잔고로 매수: ${fmtPrice(available)}원`);
+        }
       }
     } else {
       const cachedKrw = STATE.liveBalance;
@@ -1830,7 +1841,7 @@ async function executeEntry(candidate) {
         try {
           const freshKrw = await getLiveBalance();
           available = freshKrw;
-          if (freshKrw > 0) { STATE.liveBalance = freshKrw; STATE.liveBalanceTs = Date.now(); }
+          if (freshKrw > 0) { STATE.liveBalance = freshKrw; STATE.liveBalanceTs = Date.now(); STATE.liveBalanceKrwForUs = freshKrw; }
           else if (cachedKrw > 0) available = cachedKrw; // 폴백
         } catch {
           available = cachedKrw > 0 ? cachedKrw : 0;
@@ -1961,9 +1972,10 @@ async function tickPositions() {
           STATE.liveBalance   = bal;
           STATE.liveBalanceTs = Date.now();
           STATE.liveBalanceFetching = false;
-          if (bal > 0 && bal !== prev) { addLog('info', `💰 국내 잔고 갱신: ${fmtPrice(bal)}원`); updateStatsUI(); }
+          if (bal > 0) STATE.liveBalanceKrwForUs = bal; // 통합증거금 자동 동기화
+          if (bal > 0 && bal !== prev) { addLog('info', `💰 국내 잔고 갱신: ${fmtPrice(bal)}원 (통합증거금 — 미국주식 가용)`); updateStatsUI(); }
           else if (bal === 0 && prev > 0) updateStatsUI();
-          else updateStatsUI(); // 최초 조회 완료 시에도 UI 갱신 (0원 → hasQueried=true)
+          else updateStatsUI();
         }).catch(() => {
           STATE.liveBalanceFetching = false;
           STATE.liveBalanceTs = Date.now(); // 실패도 "조회 완료"로 간주 — 30초 후 재시도
