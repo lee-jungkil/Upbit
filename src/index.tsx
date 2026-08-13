@@ -1242,7 +1242,7 @@ app.get('/', (c) => {
   </div>
 </div>
 
-<script src="/static/app.js?v=t1786636992"></script>
+<script src="/static/app.1786637256.js"></script>
 </body>
 </html>`)
 })
