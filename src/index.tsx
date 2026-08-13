@@ -361,12 +361,13 @@ app.post('/api/kis/us/price', async (c) => {
 // CF Workers 다중 인스턴스 문제 해결 — 같은 Worker 인스턴스에서 토큰 1회만 발급
 app.post('/api/kis/us/prices', async (c) => {
   const body = await c.req.json().catch(() => ({})) as any
-  const { appKey, appSecret, symbols } = body
+  const { appKey, appSecret, symbols, accountNo } = body
   // symbols: [{ ticker: 'AAPL', excd: 'NAS' }, ...]
+  // accountNo: 선택 — 전달 시 잔고도 함께 조회 (토큰 1회 공유)
   if (!appKey || !appSecret || !Array.isArray(symbols) || symbols.length === 0) {
     return c.json({ error: 'appKey, appSecret, symbols[] 필수' }, 400)
   }
-  // ── 토큰 1회만 발급 (같은 인스턴스에서 처리 — 다중 발급 방지)
+  // ── 토큰 1회만 발급 — 시세 + 잔고 모두 이 토큰으로 처리
   const { token, error, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret)
   if (!token) {
     return c.json({ error: error || '토큰 실패', serverBlocked: !!networkError }, networkError ? 503 : 401)
@@ -404,10 +405,40 @@ app.post('/api/kis/us/prices', async (c) => {
           low:        parseFloat(out.low  || '0'),
         })
       }
-      // 실패 시 조용히 스킵 (results에 포함 안 함)
     } catch { /* 개별 종목 타임아웃·오류 시 스킵 */ }
   }
-  return c.json({ ok: true, results })
+
+  // ── 잔고 조회 (accountNo 전달 시) — 같은 토큰 재사용, 추가 발급 없음
+  let balance: { cashUsd: number; cashKrw: number; totalUsd: number } | null = null
+  if (accountNo) {
+    try {
+      const [cano, acntPrdtCd] = String(accountNo).split('-')
+      const balUrl = `https://openapi.koreainvestment.com:9443/uapi/overseas-stock/v1/trading/inquire-balance?CANO=${cano}&ACNT_PRDT_CD=${acntPrdtCd}&OVRS_EXCG_CD=NASD&TR_CRCY_CD=USD&CTX_AREA_FK200=&CTX_AREA_NK200=`
+      const balRes = await fetch(balUrl, {
+        headers: {
+          authorization: `Bearer ${token}`,
+          appkey: appKey, appsecret: appSecret,
+          tr_id: 'TTTS3012R', custtype: 'P',
+        },
+        // @ts-ignore
+        signal: AbortSignal.timeout(8000),
+      })
+      const balData: any = await balRes.json()
+      if (balData.rt_cd === '0') {
+        const out2 = balData.output2?.[0] || {}
+        const out3 = balData.output3 || {}
+        balance = {
+          cashUsd: parseFloat(out2.frcr_dncl_amt_2 || out2.frcr_evlu_amt || out2.ovrs_cblc_amt || '0'),
+          cashKrw: parseFloat(out3.wdrw_psbl_tot_amt || out3.tot_dncl_amt || '0'),
+          totalUsd: parseFloat(out3.frcr_evlu_tota || out2.tot_evlu_amt || '0'),
+        }
+      } else {
+        balance = { cashUsd: -1, cashKrw: -1, totalUsd: 0 } // 오류 표시용 (-1)
+      }
+    } catch { /* 잔고 조회 실패 시 null 유지 */ }
+  }
+
+  return c.json({ ok: true, results, balance })
 })
 
 // ── KIS 프록시: 미국주식 잔고 조회

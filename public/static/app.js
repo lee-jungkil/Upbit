@@ -1597,13 +1597,14 @@ async function generateUsCandidates() {
   // 실전 모드: KIS API 배치 엔드포인트로 1회 요청 (토큰 1회 발급 — 다중 발급 방지)
   if (STATE.mode === 'live' && KEYS.appKey) {
     try {
-      // 20개 종목을 서버 1회 요청으로 처리 — CF Workers 다중 인스턴스 토큰 과다발급 방지
+      // 20개 종목을 서버 1회 요청으로 처리 — 잔고도 함께 조회 (토큰 1회 발급으로 모두 처리)
       const res = await fetch('/api/kis/us/prices', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           appKey: KEYS.appKey, appSecret: KEYS.appSecret,
           symbols: US_STOCKS.map(s => ({ ticker: s.ticker, excd: s.excd })),
+          accountNo: KEYS.accountNo || null, // 잔고 동시 조회 (토큰 추가 발급 없음)
         }),
         signal: AbortSignal.timeout(60000), // 순차 처리이므로 여유 있게 60초
       });
@@ -1611,6 +1612,17 @@ async function generateUsCandidates() {
       if (!res.ok || !data.ok) {
         addLog('warn', `⚠️ 미국주식 시세 배치 조회 실패 — ${data.error || res.status}`);
         return generateUsSimCandidates(strategy, ap);
+      }
+      // ── 잔고 결과 처리 (같은 토큰으로 동시 조회됨 — 토큰 추가 발급 없음)
+      if (data.balance && data.balance.cashUsd >= 0) {
+        const bal = data.balance;
+        STATE.liveBalanceUsd    = bal.cashUsd;
+        STATE.liveBalanceUsdTs  = Date.now();
+        STATE.liveBalanceUsdFetching = false;
+        if (bal.cashKrw > 0) {
+          STATE.liveBalanceKrwForUs = bal.cashKrw;
+        }
+        updateStatsUI();
       }
       const rawResults = data.results || [];
       // US_STOCKS 메타(name) 병합
@@ -1722,33 +1734,16 @@ async function executeEntry(candidate) {
     }
     available = isUs ? (STATE.paperBalanceUsd * STATE.usdKrw) : STATE.paperBalance;
   } else {
-    // ── 실전 모드: 캐시 우선, 캐시 없으면 1회 직접 조회 (인플라이트 뮤텍스로 중복 방지)
+    // ── 실전 모드: generateUsCandidates 배치 조회에서 이미 잔고 갱신됨 → 캐시만 사용
     if (isUs) {
       const cachedUsd = STATE.liveBalanceUsd;
       const cacheAge  = Date.now() - STATE.liveBalanceUsdTs;
-      const neverFetched = STATE.liveBalanceUsdTs === 0; // 한 번도 조회 안 된 상태
 
       if (cachedUsd > 0 && cacheAge < 120000) {
-        // 캐시 신선 (2분 이내) → 그대로 사용
+        // 캐시 신선 → 그대로 사용
         available = cachedUsd * STATE.usdKrw;
-      } else if (neverFetched || (cachedUsd === 0 && STATE.liveBalanceKrwForUs === 0)) {
-        // 최초 실행이거나 달러·원화 둘 다 0 → 직접 1회 조회
-        // getUsLiveBalance 내 인플라이트 뮤텍스가 동시 중복 발급을 차단
-        try {
-          const freshUsd = await getUsLiveBalance();
-          if (freshUsd > 0) {
-            STATE.liveBalanceUsd   = freshUsd;
-            STATE.liveBalanceUsdTs = Date.now();
-            available = freshUsd * STATE.usdKrw;
-          } else {
-            // cashUsd=0이지만 cashKrw는 getUsLiveBalance 내부에서 STATE에 저장됨
-            available = 0;
-          }
-        } catch {
-          available = cachedUsd > 0 ? cachedUsd * STATE.usdKrw : 0;
-        }
       } else {
-        // 캐시 만료됐지만 이전 값 있음 → 폴백 (tickPositions가 곧 갱신)
+        // 캐시 만료 또는 미조회 → 이전 캐시 폴백 (배치 조회가 곧 갱신)
         available = cachedUsd > 0 ? cachedUsd * STATE.usdKrw : 0;
       }
       // ── 통합증거금: 달러 잔고=0이어도 원화 가용금액이 있으면 매수 가능
@@ -1903,21 +1898,20 @@ async function tickPositions() {
         });
       }
     }
-    // ── 미국 달러 잔고 30초마다 폴링 (BOTH 모드 시 15초 오프셋) ──
+    // ── 미국 달러 잔고 폴링 ──
+    // 봇 실행 중: 스캔 사이클의 배치 조회(/api/kis/us/prices)에서 잔고도 함께 처리
+    //            → 여기서 추가 조회 시 토큰 중복 발급 위험 → 봇 실행 중에는 스킵
+    // 봇 정지 중: 60초마다 단독 폴링 (UI 표시용)
     if ((STATE.market === 'US' || STATE.market === 'BOTH')) {
       const elapsedUsd = Date.now() - STATE.liveBalanceUsdTs;
-      // BOTH 모드: 처음 한 번은 KR 조회(liveBalanceTs) 완료 후 15초 뒤부터 시작
-      // → liveBalanceUsdTs === 0 이면 KR 조회가 완료(liveBalanceTs > 0)된 지 15초 경과 후 첫 조회
-      const isBoth = STATE.market === 'BOTH';
-      const krDone = STATE.liveBalanceTs > 0;
-      const krElapsed = Date.now() - STATE.liveBalanceTs;
-      // BOTH 모드 최초 조회: KR 완료 후 15초 대기
-      const canFetchUs = !isBoth || !krDone
-        ? elapsedUsd > 30000           // US 단독 모드 또는 KR 미완료 시 일반 폴링
-        : (STATE.liveBalanceUsdTs === 0
-            ? krElapsed > 15000        // BOTH 최초: KR 완료 15초 후
-            : elapsedUsd > 30000);     // BOTH 이후: 30초마다 일반 폴링
-      if (!STATE.liveBalanceUsdFetching && canFetchUs) {
+      const botRunning = STATE.running;
+      // 봇 실행 중이면 배치 조회가 담당 — 여기서는 60초 이상 경과 + 봇 정지일 때만 폴링
+      const canFetchUs = !STATE.liveBalanceUsdFetching && (
+        botRunning
+          ? false  // 봇 실행 중: tickPositions에서 잔고 조회 안 함 (배치에서 처리)
+          : elapsedUsd > 60000  // 봇 정지: 60초마다 UI 표시용 폴링
+      );
+      if (canFetchUs) {
         STATE.liveBalanceUsdFetching = true;
         getUsLiveBalance().then(usd => {
           const prev = STATE.liveBalanceUsd;
@@ -1927,10 +1921,10 @@ async function tickPositions() {
           if (usd > 0 && Math.abs(usd - prev) > 0.01) {
             addLog('info', `💵 미국 달러 잔고 갱신: $${usd.toFixed(2)} (≈${fmtPrice(Math.round(usd * STATE.usdKrw))}원)`);
             updateStatsUI();
-          } else updateStatsUI(); // 최초 조회 완료 시에도 UI 갱신
+          } else updateStatsUI();
         }).catch(() => {
           STATE.liveBalanceUsdFetching = false;
-          STATE.liveBalanceUsdTs = Date.now(); // 실패도 30초 후 재시도
+          STATE.liveBalanceUsdTs = Date.now();
         });
       }
     }
