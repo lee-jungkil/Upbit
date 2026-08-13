@@ -258,12 +258,13 @@ app.post('/api/kis/balance', async (c) => {
       }
       const errMsg = data.msg1 || data.msg2 || JSON.stringify(data).slice(0, 200)
       const rtCd = data.rt_cd || 'unknown'
-      return c.json({
-        error: errMsg,
-        rtCd,
-        serverBlocked: false,
-        hint: rtCd === '1' ? '토큰 만료 — 재발급 실패. 잠시 후 재시도' : `KIS 응답코드 ${rtCd}`,
-      }, 400)
+      const isAcnoErr = errMsg.includes('INVALID_CHECK_ACNO')
+      const hint = rtCd === '1'
+        ? '토큰 만료 — 재발급 실패. 잠시 후 재시도'
+        : isAcnoErr
+          ? '계좌번호 불일치 — APP KEY 발급 시 등록한 계좌번호와 동일하게 입력하세요 (KIS 개발자센터 확인)'
+          : `KIS 응답코드 ${rtCd}`
+      return c.json({ error: errMsg, rtCd, serverBlocked: false, hint }, 400)
     }
     const balance = parseFloat(data?.output2?.[0]?.dnca_tot_amt || '0')
     return c.json({ ok: true, balance })
@@ -390,7 +391,11 @@ app.post('/api/kis/us/balance', async (c) => {
       }
       const errMsg = data.msg1 || data.msg2 || JSON.stringify(data).slice(0, 200)
       const rtCd = data.rt_cd || 'unknown'
-      return c.json({ error: errMsg, rtCd, serverBlocked: false, hint: `미국주식 잔고 KIS 응답코드 ${rtCd}` }, 400)
+      const isAcnoErrUs = errMsg.includes('INVALID_CHECK_ACNO')
+      const hintUs = isAcnoErrUs
+        ? '계좌번호 불일치 — APP KEY 발급 시 등록한 계좌번호와 동일하게 입력하세요'
+        : `미국주식 잔고 KIS 응답코드 ${rtCd}`
+      return c.json({ error: errMsg, rtCd, serverBlocked: false, hint: hintUs }, 400)
     }
     // output2[0]: 달러 잔고 필드 (여러 필드명 시도)
     const out2 = data.output2?.[0] || {}

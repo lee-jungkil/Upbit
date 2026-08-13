@@ -1967,7 +1967,13 @@ async function getLiveBalance() {
       // KIS API 레벨 오류 (rt_cd 오류 등) — serverBlocked 아님
       const hint = data.rtCd ? ` [rt_cd=${data.rtCd}]` : '';
       addLog('warn', `⚠️ 잔고 조회 오류${hint}: ${data.error}`);
-      if (data.rtCd === '1') addLog('info', '💡 토큰 만료 가능성 — 잠시 후 자동 재시도합니다');
+      if (data.rtCd === '1') {
+        addLog('info', '💡 토큰 만료 가능성 — 잠시 후 자동 재시도합니다');
+      } else if (data.error.includes('INVALID_CHECK_ACNO')) {
+        addLog('error', '❌ 계좌번호 불일치 — APP KEY 발급 시 등록한 계좌번호와 다릅니다');
+        addLog('info', '💡 해결: KIS 개발자센터(apiportal.koreainvestment.com) → 내 앱 → 계좌번호 확인');
+        addLog('info', `   현재 입력된 계좌번호: ${KEYS.accountNo}`);
+      }
       STATE.liveBalanceTs = Date.now();
       return STATE.liveBalance;
     }
@@ -2002,7 +2008,12 @@ async function getUsLiveBalance() {
     if (data.error) {
       const hint = data.rtCd ? ` [rt_cd=${data.rtCd}]` : '';
       addLog('warn', `⚠️ 미국주식 잔고 오류${hint}: ${data.error}`);
-      if (data.rtCd === '1') addLog('info', '💡 토큰 만료 — 잠시 후 자동 재시도합니다');
+      if (data.rtCd === '1') {
+        addLog('info', '💡 토큰 만료 — 잠시 후 자동 재시도합니다');
+      } else if (data.error.includes('INVALID_CHECK_ACNO')) {
+        addLog('error', '❌ 계좌번호 불일치 — APP KEY 발급 시 등록한 계좌번호와 다릅니다');
+        addLog('info', '💡 해결: KIS 개발자센터 → 내 앱 → 등록된 계좌번호 확인 후 동일하게 입력');
+      }
       STATE.liveBalanceUsdTs = Date.now();
       return STATE.liveBalanceUsd;
     }
