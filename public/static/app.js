@@ -51,15 +51,15 @@ const STATE = {
   _lastMarketClosedLog: 0,
 };
 
-// API 키 (세션 스토리지)
+// API 키 (로컬 스토리지 — 새로고침/탭 닫아도 유지)
 const KEYS = {
-  get appKey()    { return sessionStorage.getItem('kis_app_key') || '' },
-  get appSecret() { return sessionStorage.getItem('kis_app_secret') || '' },
-  get accountNo() { return sessionStorage.getItem('kis_account_no') || '' },
+  get appKey()    { return localStorage.getItem('kis_app_key') || '' },
+  get appSecret() { return localStorage.getItem('kis_app_secret') || '' },
+  get accountNo() { return localStorage.getItem('kis_account_no') || '' },
   save(k, s, a) {
-    sessionStorage.setItem('kis_app_key',    k);
-    sessionStorage.setItem('kis_app_secret', s);
-    sessionStorage.setItem('kis_account_no', a);
+    localStorage.setItem('kis_app_key',    k);
+    localStorage.setItem('kis_app_secret', s);
+    localStorage.setItem('kis_account_no', a);
   }
 };
 
@@ -80,10 +80,46 @@ window.addEventListener('DOMContentLoaded', async () => {
   updateMarketStatus();
   await loadTradeHistory();
   initProfitChart();
+
+  // 저장된 모드 복원 (localStorage에서 읽기)
+  const savedMode = localStorage.getItem('bot_mode') || 'paper';
+  STATE.mode = savedMode;
+  document.getElementById('mode-paper').classList.toggle('active-mode', savedMode === 'paper');
+  document.getElementById('mode-live').classList.toggle('active-mode', savedMode === 'live');
+  document.getElementById('mode-live').classList.toggle('danger', savedMode === 'live');
+
   updateStatsUI();
   renderPosSlots();
   updateAdaptiveBadge();
-  addLog('info', '📈 StockBot 초기화 완료. API 키를 설정하세요.');
+
+  const logMsg = KEYS.appKey
+    ? `📈 StockBot 초기화 완료. API 키 확인됨 (${KEYS.appKey.slice(0,4)}...)`
+    : '📈 StockBot 초기화 완료. API 키를 설정하세요.';
+  addLog('info', logMsg);
+
+  // 실전 모드로 복원된 경우 잔고 자동 조회
+  if (savedMode === 'live' && KEYS.appKey && KEYS.accountNo) {
+    addLog('info', '🔄 실전 모드 복원 — 잔고 자동 조회 중...');
+    STATE.liveBalanceFetching = true;
+    updateStatsUI();
+    getLiveBalance().then(bal => {
+      STATE.liveBalance    = bal;
+      STATE.liveBalanceTs  = Date.now();
+      STATE.liveBalanceFetching = false;
+      if (bal > 0) addLog('info', `💰 잔고 복원: ${fmtPrice(bal)}원`);
+      updateStatsUI();
+    }).catch(() => {
+      STATE.liveBalanceFetching = false;
+      STATE.liveBalanceTs = Date.now();
+      updateStatsUI();
+    });
+    // US/BOTH 모드면 달러 잔고도 조회
+    if (STATE.market === 'US' || STATE.market === 'BOTH') {
+      triggerUsdBalanceFetch();
+    }
+    // 환율 사전 조회
+    if (STATE.market !== 'KR') fetchUsdKrw();
+  }
 
   // 주기적 UI 갱신: 포지션 가격 + 총자산 카드
   setInterval(tickPositions, 5000);
@@ -109,8 +145,27 @@ function saveApiKeys() {
   if (!k || k === '●●●●●●●●') { showApiResult('⚠️ APP KEY를 입력하세요', 'warn'); return; }
   if (!s || s === '●●●●●●●●') { showApiResult('⚠️ APP SECRET를 입력하세요', 'warn'); return; }
   KEYS.save(k, s, a);
-  showApiResult('✅ 저장 완료', 'ok');
-  addLog('info', '🔑 API 키 저장 완료');
+  showApiResult('✅ 저장 완료 (새로고침 후에도 유지됨)', 'ok');
+  addLog('info', '🔑 API 키 저장 완료 (localStorage — 영구 보관)');
+  // 실전 모드 상태면 즉시 잔고 재조회
+  if (STATE.mode === 'live' && a) {
+    setTimeout(() => {
+      STATE.liveBalanceTs = 0;
+      STATE.liveBalanceFetching = true;
+      updateStatsUI();
+      getLiveBalance().then(bal => {
+        STATE.liveBalance = bal;
+        STATE.liveBalanceTs = Date.now();
+        STATE.liveBalanceFetching = false;
+        if (bal > 0) addLog('info', `💰 잔고 확인: ${fmtPrice(bal)}원`);
+        updateStatsUI();
+      }).catch(() => {
+        STATE.liveBalanceFetching = false;
+        STATE.liveBalanceTs = Date.now();
+        updateStatsUI();
+      });
+    }, 900); // 모달 닫힌 후 조회
+  }
   setTimeout(closeApiSettings, 800);
 }
 
@@ -120,8 +175,8 @@ function saveApiKeys() {
  * ∙ Cloudflare Pages 배포 후: 엣지 서버 → KIS 정상 연결 기대
  */
 async function kisGetTokenViaProxy(appKey, appSecret) {
-  const cached = sessionStorage.getItem('kis_token_cached');
-  const exp    = parseInt(sessionStorage.getItem('kis_token_exp') || '0');
+  const cached = localStorage.getItem('kis_token_cached');
+  const exp    = parseInt(localStorage.getItem('kis_token_exp') || '0');
   if (cached && Date.now() < exp) return cached;
 
   const res = await fetch('/api/kis/token', {
@@ -135,8 +190,8 @@ async function kisGetTokenViaProxy(appKey, appSecret) {
     throw Object.assign(new Error(data.error || '서버 프록시 차단'), { serverBlocked: true });
   }
   // 프록시 성공 시 클라이언트 캐시에도 저장 (상징적 — 실제 토큰은 서버 KV에 캐시됨)
-  sessionStorage.setItem('kis_token_cached', 'proxy_ok');
-  sessionStorage.setItem('kis_token_exp', String(Date.now() + 82800 * 1000));
+  localStorage.setItem('kis_token_cached', 'proxy_ok');
+  localStorage.setItem('kis_token_exp', String(Date.now() + 82800 * 1000));
   return 'proxy_ok';  // 토큰 자체는 서버에서 관리
 }
 
@@ -174,10 +229,42 @@ async function testApiConnection() {
 
     if (data.ok) {
       // ✅ 토큰 발급 성공 — KIS 연결 + 인증 모두 OK
-      sessionStorage.setItem('kis_token_cached', 'proxy_ok');
-      sessionStorage.setItem('kis_token_exp', String(Date.now() + 82800 * 1000));
-      showApiResult('✅ KIS 연결 성공! 실전 모드로 거래 가능합니다', 'ok');
+      localStorage.setItem('kis_token_cached', 'proxy_ok');
+      localStorage.setItem('kis_token_exp', String(Date.now() + 82800 * 1000));
+      showApiResult('✅ KIS 연결 성공! 저장 버튼을 눌러 키를 저장하세요', 'ok');
       addLog('info', '✅ KIS 연결 성공 — 서버 프록시 모드 (실전 모드 사용 가능)');
+
+      // 실전 모드 + 계좌번호 있으면 즉시 잔고 조회 (저장 전이라도 현재 입력된 계좌번호로 조회)
+      const a = document.getElementById('input-account-no').value.trim();
+      if (STATE.mode === 'live' && a) {
+        // 현재 입력된 키/계좌로 임시 조회 (저장 여부와 무관)
+        setTimeout(async () => {
+          STATE.liveBalanceTs = 0;
+          STATE.liveBalanceFetching = true;
+          updateStatsUI();
+          try {
+            const balRes = await fetch('/api/kis/balance', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ appKey: k, appSecret: s, accountNo: a }),
+            });
+            const balData = await balRes.json();
+            if (balData.ok && typeof balData.balance === 'number') {
+              STATE.liveBalance = balData.balance;
+              STATE.liveBalanceTs = Date.now();
+              if (balData.balance > 0) addLog('info', `💰 실전 잔고: ${fmtPrice(balData.balance)}원`);
+              else addLog('info', '💰 잔고 조회 완료 (주문 가능 현금 없음)');
+            } else {
+              STATE.liveBalanceTs = Date.now();
+            }
+          } catch {
+            STATE.liveBalanceTs = Date.now();
+          } finally {
+            STATE.liveBalanceFetching = false;
+            updateStatsUI();
+          }
+        }, 300);
+      }
     } else if (data.kisReachable) {
       // ⚠️ KIS 서버에는 연결됐으나 키 인증 실패 (잘못된 키)
       showApiResult('⚠️ KIS 서버 연결 OK — 키 인증 실패. APP KEY/SECRET을 확인하세요', 'warn');
@@ -233,6 +320,7 @@ function showApiResult(msg, type) {
 // ─── 모드 / 전략 설정 ─────────────────────────────────────────
 function setMode(mode) {
   STATE.mode = mode;
+  localStorage.setItem('bot_mode', mode);  // 모드 영구 저장
   document.getElementById('mode-paper').classList.toggle('active-mode', mode === 'paper');
   document.getElementById('mode-live').classList.toggle('active-mode', mode === 'live');
   document.getElementById('mode-live').classList.toggle('danger', mode === 'live');
@@ -246,18 +334,31 @@ function setMode(mode) {
       addLog('info', '   ∙ 주문 실행: 서버 프록시(/api/kis/order) 경유');
       addLog('info', '   ⚠️ 로컬 환경에서는 주문이 차단될 수 있습니다 — 연결 테스트 먼저 권장');
       // ── 실전 전환 즉시 잔고 조회 시작 ─────────────────
-      STATE.liveBalanceTs = 0;
-      const cashEl = document.getElementById('stat-cash');
-      if (cashEl) cashEl.textContent = '조회 중…';
+      STATE.liveBalanceTs = 0;    // 조회 미완료 상태로 초기화
+      STATE.liveBalanceUsdTs = 0;
+      // 즉시 UI를 "조회 중" 상태로 갱신
+      updateStatsUI();
       if (KEYS.accountNo && !STATE.liveBalanceFetching) {
         STATE.liveBalanceFetching = true;
+        updateStatsUI(); // fetching=true 즉시 반영
         getLiveBalance().then(bal => {
           STATE.liveBalance    = bal;
           STATE.liveBalanceTs  = Date.now();
           STATE.liveBalanceFetching = false;
           if (bal > 0) addLog('info', `💰 실전 잔고 확인: ${fmtPrice(bal)}원`);
+          else addLog('info', '💰 잔고 조회 완료 (주문 가능 현금 없음 — KIS 앱 확인 권장)');
           updateStatsUI();
-        }).catch(() => { STATE.liveBalanceFetching = false; });
+        }).catch((e) => {
+          STATE.liveBalanceFetching = false;
+          STATE.liveBalanceTs = Date.now(); // 실패도 "조회 완료"로 표시
+          addLog('warn', '⚠️ 잔고 조회 실패: ' + (e?.message || '네트워크 오류'));
+          updateStatsUI();
+        });
+      } else if (!KEYS.accountNo) {
+        addLog('warn', '⚠️ 계좌번호를 설정하세요 (API 설정에서 계좌번호 입력)');
+        // 계좌번호 없으면 "조회 불가" 상태 — "계좌 연결 필요" 대신 "계좌번호 필요" 표시
+        STATE.liveBalanceTs = 0;  // 조회 미완료 유지 (계좌번호 없음 표시용)
+        updateStatsUI();
       }
       // 미국 모드면 달러 잔고도 조회
       if (STATE.market === 'US' || STATE.market === 'BOTH') {
@@ -1662,7 +1763,11 @@ async function tickPositions() {
           STATE.liveBalanceFetching = false;
           if (bal > 0 && bal !== prev) { addLog('info', `💰 국내 잔고 갱신: ${fmtPrice(bal)}원`); updateStatsUI(); }
           else if (bal === 0 && prev > 0) updateStatsUI();
-        }).catch(() => { STATE.liveBalanceFetching = false; });
+          else updateStatsUI(); // 최초 조회 완료 시에도 UI 갱신 (0원 → hasQueried=true)
+        }).catch(() => {
+          STATE.liveBalanceFetching = false;
+          STATE.liveBalanceTs = Date.now(); // 실패도 "조회 완료"로 간주 — 30초 후 재시도
+        });
       }
     }
     // ── 미국 달러 잔고 30초마다 폴링 ───────────────────────
@@ -1678,8 +1783,11 @@ async function tickPositions() {
           if (usd > 0 && Math.abs(usd - prev) > 0.01) {
             addLog('info', `💵 미국 달러 잔고 갱신: $${usd.toFixed(2)} (≈${fmtPrice(Math.round(usd * STATE.usdKrw))}원)`);
             updateStatsUI();
-          }
-        }).catch(() => { STATE.liveBalanceUsdFetching = false; });
+          } else updateStatsUI(); // 최초 조회 완료 시에도 UI 갱신
+        }).catch(() => {
+          STATE.liveBalanceUsdFetching = false;
+          STATE.liveBalanceUsdTs = Date.now(); // 실패도 30초 후 재시도
+        });
       }
     }
   }
@@ -1758,11 +1866,20 @@ async function getLiveBalance() {
     });
     const data = await res.json();
     if (data.serverBlocked) {
-      addLog('warn', '⚠️ 서버→KIS 연결 차단 — 실전 잔고 조회 불가');
+      addLog('warn', '⚠️ 서버→KIS 연결 차단 — 잔고 조회 불가 (배포 후 이용 가능)');
+      // serverBlocked도 "조회 시도 완료"로 처리 — "계좌 연결 필요" 오표시 방지
+      STATE.liveBalanceTs = Date.now();
+      return STATE.liveBalance;
+    }
+    if (!res.ok || data.error) {
+      addLog('warn', '⚠️ 잔고 조회 응답 오류: ' + (data.error || res.status));
+      STATE.liveBalanceTs = Date.now();
       return STATE.liveBalance;
     }
     return data.balance || 0;
-  } catch {
+  } catch (e) {
+    addLog('warn', '⚠️ 잔고 조회 네트워크 오류: ' + (e?.message || ''));
+    STATE.liveBalanceTs = Date.now();
     return STATE.liveBalance;
   }
 }
@@ -1778,11 +1895,20 @@ async function getUsLiveBalance() {
     });
     const data = await res.json();
     if (data.serverBlocked) {
-      addLog('warn', '⚠️ 서버→KIS 연결 차단 — 미국주식 잔고 조회 불가');
+      addLog('warn', '⚠️ 서버→KIS 연결 차단 — 미국주식 잔고 조회 불가 (배포 후 이용 가능)');
+      // serverBlocked도 "조회 시도 완료"로 처리
+      STATE.liveBalanceUsdTs = Date.now();
+      return STATE.liveBalanceUsd;
+    }
+    if (!res.ok || data.error) {
+      addLog('warn', '⚠️ 미국주식 잔고 응답 오류: ' + (data.error || res.status));
+      STATE.liveBalanceUsdTs = Date.now();
       return STATE.liveBalanceUsd;
     }
     return data.cashUsd || 0;
-  } catch {
+  } catch (e) {
+    addLog('warn', '⚠️ 미국주식 잔고 네트워크 오류: ' + (e?.message || ''));
+    STATE.liveBalanceUsdTs = Date.now();
     return STATE.liveBalanceUsd;
   }
 }
@@ -1986,6 +2112,7 @@ function updateStatsUI() {
     const cashUsd   = STATE.liveBalanceUsd;    // 달러 현금 잔고
     const fetching  = STATE.liveBalanceFetching;
     const fetchingUsd = STATE.liveBalanceUsdFetching;
+    const hasApiKey = !!KEYS.appKey && !!KEYS.accountNo; // API 키 + 계좌번호 모두 있어야 연결됨
 
     // 달러 포지션 평가금 (원화 환산)
     const stockValKr  = STATE.positions.filter(p => p.market !== 'US').reduce((s,p) => s + p.currentPrice * p.qty, 0);
@@ -1994,22 +2121,39 @@ function updateStatsUI() {
 
     // 총자산 계산
     let totalAsset = 0;
-    if (mkt === 'KR')   totalAsset = cash + stockValKr;
-    else if (mkt === 'US')  totalAsset = Math.round(cashUsd * STATE.usdKrw) + stockValUsdKrw;
-    else                totalAsset = cash + stockValKr + Math.round(cashUsd * STATE.usdKrw) + stockValUsdKrw;
+    if (mkt === 'KR')        totalAsset = cash + stockValKr;
+    else if (mkt === 'US')   totalAsset = Math.round(cashUsd * STATE.usdKrw) + stockValUsdKrw;
+    else                     totalAsset = cash + stockValKr + Math.round(cashUsd * STATE.usdKrw) + stockValUsdKrw;
 
     const hasCash   = cash > 0 || cashUsd > 0;
     const hasStock  = stockValKr > 0 || stockValUsd > 0;
+    // 조회 완료 여부: 한 번이라도 조회를 완료했으면 true (잔고 0이어도)
+    const hasQueried = STATE.liveBalanceTs > 0 || STATE.liveBalanceUsdTs > 0;
 
     // 총 자산 표시
     const assetEl = document.getElementById('stat-total-asset');
-    if ((fetching || fetchingUsd) && !hasCash) {
+    if ((fetching || fetchingUsd) && !hasCash && !hasStock) {
+      // 조회 진행 중
       assetEl.textContent = '조회 중…';
       assetEl.className = 'text-2xl font-bold text-yellow-400 tracking-tight';
     } else if (hasCash || hasStock) {
+      // 잔고 있음
       assetEl.textContent = fmtPrice(totalAsset) + '원';
       assetEl.className = 'text-2xl font-bold text-white tracking-tight';
+    } else if (hasQueried) {
+      // 조회는 완료됐으나 잔고 0 (정상 — 주문 가능 현금 없는 상태)
+      assetEl.textContent = fmtPrice(totalAsset) + '원';
+      assetEl.className = 'text-2xl font-bold text-gray-300 tracking-tight';
+    } else if (hasApiKey) {
+      // API 키 + 계좌번호 있지만 아직 조회 시작 안 됨
+      assetEl.textContent = '잔고 조회 중…';
+      assetEl.className = 'text-2xl font-bold text-yellow-400 tracking-tight';
+    } else if (KEYS.appKey && !KEYS.accountNo) {
+      // API 키는 있지만 계좌번호 없음
+      assetEl.textContent = '계좌번호 필요';
+      assetEl.className = 'text-2xl font-bold text-orange-400 tracking-tight';
     } else {
+      // API 키 자체가 없음
       assetEl.textContent = '계좌 연결 필요';
       assetEl.className = 'text-2xl font-bold text-gray-500 tracking-tight';
     }
@@ -2022,28 +2166,34 @@ function updateStatsUI() {
         cashEl.textContent = '조회 중…';
       } else if (cashUsd > 0) {
         cashEl.textContent = `$${cashUsd.toFixed(2)} (≈${fmtPrice(Math.round(cashUsd * STATE.usdKrw))}원)`;
+      } else if (hasQueried) {
+        cashEl.textContent = '$0.00 (잔고 없음)';
       } else {
-        cashEl.textContent = '미연결';
+        cashEl.textContent = hasApiKey ? '조회 중…' : '미연결';
       }
     } else if (mkt === 'BOTH') {
       // BOTH 모드: 원화 + 달러 합산
       const krPart = cash > 0 ? fmtPrice(cash) + '원' : '';
       const usPart = cashUsd > 0 ? `$${cashUsd.toFixed(0)}` : '';
-      if (fetching && cash === 0 && fetchingUsd && cashUsd === 0) {
+      if ((fetching || fetchingUsd) && cash === 0 && cashUsd === 0 && !hasQueried) {
         cashEl.textContent = '조회 중…';
       } else if (krPart || usPart) {
         cashEl.textContent = [krPart, usPart].filter(Boolean).join(' / ');
+      } else if (hasQueried) {
+        cashEl.textContent = '0원 / $0 (잔고 없음)';
       } else {
-        cashEl.textContent = '미연결';
+        cashEl.textContent = hasApiKey ? '조회 중…' : '미연결';
       }
     } else {
       // KR 모드
-      if (fetching && !cash) {
+      if (fetching && cash === 0 && !hasQueried) {
         cashEl.textContent = '조회 중…';
-      } else if (cash) {
+      } else if (cash > 0) {
         cashEl.textContent = fmtPrice(cash) + '원';
+      } else if (hasQueried) {
+        cashEl.textContent = '0원 (잔고 없음)';
       } else {
-        cashEl.textContent = '미연결';
+        cashEl.textContent = hasApiKey ? '조회 중…' : '미연결';
       }
     }
 
