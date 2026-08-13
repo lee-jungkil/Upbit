@@ -1731,14 +1731,11 @@ async function executeEntry(candidate) {
         // 캐시 신선 (2분 이내) → 캐시 그대로 사용
         available = cachedUsd * STATE.usdKrw;
       } else {
-        // 캐시 없거나 오래됨 → 1회 조회 시도, 실패 시 이전 캐시 폴백
-        try {
-          const freshUsd = await getUsLiveBalance();
-          available = freshUsd * STATE.usdKrw;
-          if (freshUsd > 0) { STATE.liveBalanceUsd = freshUsd; STATE.liveBalanceUsdTs = Date.now(); }
-          else if (cachedUsd > 0) available = cachedUsd * STATE.usdKrw; // 폴백
-        } catch {
-          available = cachedUsd > 0 ? cachedUsd * STATE.usdKrw : 0;
+        // 캐시 없거나 오래됨 → tickPositions 캐시 폴백만 사용 (직접 조회 금지)
+        // 이미 tickPositions/getUsLiveBalance에서 인플라이트 조회 중 — 여기서 중복 호출 시 토큰 한도 초과
+        available = cachedUsd > 0 ? cachedUsd * STATE.usdKrw : 0;
+        if (available === 0) {
+          addLog('info', '⏳ 미국 잔고 캐시 갱신 대기 중 — 다음 사이클에 재시도');
         }
       }
       // ── 통합증거금: 달러 잔고=0이어도 원화 가용금액이 있으면 매수 가능
@@ -2032,8 +2029,18 @@ async function getLiveBalance() {
 }
 
 /** 미국주식 달러 잔고 조회 */
+// ── 인플라이트 뮤텍스: 동시에 여러 곳에서 호출돼도 실제 fetch는 1번만 실행
+let _usBalanceInflight = null;
+
 async function getUsLiveBalance() {
   if (!KEYS.appKey || !KEYS.accountNo) return STATE.liveBalanceUsd;
+  // 이미 진행 중인 요청이 있으면 같은 Promise를 공유 (중복 발급 방지)
+  if (_usBalanceInflight) return _usBalanceInflight;
+  _usBalanceInflight = _doGetUsLiveBalance().finally(() => { _usBalanceInflight = null; });
+  return _usBalanceInflight;
+}
+
+async function _doGetUsLiveBalance() {
   try {
     const res = await fetch('/api/kis/us/balance', {
       method: 'POST',
