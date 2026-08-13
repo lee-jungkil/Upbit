@@ -399,8 +399,12 @@ app.post('/api/kis/us/balance', async (c) => {
     }
     // output2[0]: 달러 잔고 필드 (여러 필드명 시도)
     const out2 = data.output2?.[0] || {}
+    const out3 = data.output3 || {}
     const cashUsd = parseFloat(out2.frcr_dncl_amt_2 || out2.frcr_evlu_amt || out2.ovrs_cblc_amt || '0')
-    return c.json({ ok: true, cashUsd, totalUsd: parseFloat(out2.tot_evlu_amt || '0') })
+    // 통합증거금 계좌: 원화로 해외주식 매수 가능 — output3.wdrw_psbl_tot_amt (원화 출금가능 총금액)
+    // 달러 잔고($0)여도 원화 잔고가 있으면 매수 가능
+    const cashKrw = parseFloat(out3.wdrw_psbl_tot_amt || out3.tot_dncl_amt || '0')
+    return c.json({ ok: true, cashUsd, cashKrw, totalUsd: parseFloat(out3.frcr_evlu_tota || out2.tot_evlu_amt || '0') })
   }
 
   try {

@@ -39,6 +39,7 @@ const STATE = {
   liveBalanceFetching: false,
   // ── 미국주식 잔고 캐시 ─────────────────────────────────
   liveBalanceUsd: 0,       // 달러 현금 잔고
+  liveBalanceKrwForUs: 0,  // 통합증거금 원화 가용금액 (환전 없이 해외주식 매수 가능)
   liveBalanceUsdTs: 0,
   liveBalanceUsdFetching: false,
   // ── 환율 캐시 ──────────────────────────────────────────
@@ -442,6 +443,7 @@ function setMarket(market) {
     // 미국 잔고 캐시 초기화
     STATE.liveBalanceUsd = 0;
     STATE.liveBalanceUsdTs = 0;
+    STATE.liveBalanceKrwForUs = 0;
   } else if (market === 'US') {
     addLog('info', '🇺🇸 미국주식 모드 — 야간 정규장 (23:30~06:00 KST)');
     addLog('info', '   ∙ 지정가 주문만 지원 (KIS API 제약)');
@@ -485,7 +487,11 @@ function triggerUsdBalanceFetch() {
     STATE.liveBalanceUsd    = usd;
     STATE.liveBalanceUsdTs  = Date.now();
     STATE.liveBalanceUsdFetching = false;
-    if (usd > 0) addLog('info', `💵 미국주식 달러 잔고: $${usd.toFixed(2)} (≈${fmtPrice(Math.round(usd * STATE.usdKrw))}원)`);
+    if (usd > 0) {
+      addLog('info', `💵 미국주식 달러 잔고: $${usd.toFixed(2)} (≈${fmtPrice(Math.round(usd * STATE.usdKrw))}원)`);
+    } else if (STATE.liveBalanceKrwForUs > 0) {
+      addLog('info', `💴 통합증거금 원화 잔고: ${fmtPrice(STATE.liveBalanceKrwForUs)}원 (환전 없이 해외주식 매수 가능)`);
+    }
     updateStatsUI();
   }).catch(() => { STATE.liveBalanceUsdFetching = false; });
 }
@@ -1731,6 +1737,11 @@ async function executeEntry(candidate) {
           available = cachedUsd > 0 ? cachedUsd * STATE.usdKrw : 0;
         }
       }
+      // ── 통합증거금: 달러 잔고=0이어도 원화 가용금액이 있으면 매수 가능
+      if (available < 10000 && STATE.liveBalanceKrwForUs > 0) {
+        available = STATE.liveBalanceKrwForUs;
+        addLog('info', `💴 통합증거금 원화 잔고로 매수: ${fmtPrice(available)}원`);
+      }
     } else {
       const cachedKrw = STATE.liveBalance;
       const cacheAge  = Date.now() - STATE.liveBalanceTs;
@@ -1750,7 +1761,9 @@ async function executeEntry(candidate) {
   }
   if (available < 10000) {
     // isUs: available은 이미 원화 환산값이므로 달러로 되돌려 표시
-    const dispStr = isUs ? `$${(available / STATE.usdKrw).toFixed(2)}` : `${fmtPrice(available)}원`;
+    // (통합증거금 원화인 경우는 원화 그대로 표시)
+    const isKrwMode = isUs && STATE.liveBalanceKrwForUs > 0 && STATE.liveBalanceUsd === 0;
+    const dispStr = (isUs && !isKrwMode) ? `$${(available / STATE.usdKrw).toFixed(2)}` : `${fmtPrice(available)}원`;
     addLog('warn', `⚠️ 가용 자금 부족: ${dispStr}`);
     return;
   }
@@ -2031,6 +2044,11 @@ async function getUsLiveBalance() {
     }
     if (data.ok && typeof data.cashUsd === 'number') {
       // ✅ 정상 응답
+      // 통합증거금: 원화 가용금액 저장 (달러 잔고=0이어도 원화로 매수 가능)
+      if (typeof data.cashKrw === 'number' && data.cashKrw > 0) {
+        STATE.liveBalanceKrwForUs = data.cashKrw;
+        addLog('info', `💴 통합증거금 원화 가용: ${fmtPrice(data.cashKrw)}원 (환전 없이 해외주식 매수 가능)`);
+      }
       return data.cashUsd;
     }
     if (data.error) {
@@ -2260,13 +2278,15 @@ function updateStatsUI() {
     const stockValUsd = STATE.positions.filter(p => p.market === 'US').reduce((s,p) => s + p.currentPrice * p.qty, 0);
     const stockValUsdKrw = Math.round(stockValUsd * STATE.usdKrw);
 
-    // 총자산 계산
+    // ── 총자산 계산 ──
+    // 통합증거금: 달러 잔고=0이어도 원화 잔고로 해외주식 매수 가능
+    const cashKrwForUs = STATE.liveBalanceKrwForUs;
     let totalAsset = 0;
     if (mkt === 'KR')        totalAsset = cash + stockValKr;
-    else if (mkt === 'US')   totalAsset = Math.round(cashUsd * STATE.usdKrw) + stockValUsdKrw;
+    else if (mkt === 'US')   totalAsset = Math.round(cashUsd * STATE.usdKrw) + stockValUsdKrw + (cashUsd === 0 ? cashKrwForUs : 0);
     else                     totalAsset = cash + stockValKr + Math.round(cashUsd * STATE.usdKrw) + stockValUsdKrw;
 
-    const hasCash   = cash > 0 || cashUsd > 0;
+    const hasCash   = cash > 0 || cashUsd > 0 || cashKrwForUs > 0;
     const hasStock  = stockValKr > 0 || stockValUsd > 0;
     // 조회 완료 여부: 한 번이라도 조회를 완료했으면 true (잔고 0이어도)
     const hasQueried = STATE.liveBalanceTs > 0 || STATE.liveBalanceUsdTs > 0;
@@ -2302,11 +2322,14 @@ function updateStatsUI() {
     // 현금 잔고 표시
     const cashEl = document.getElementById('stat-cash');
     if (mkt === 'US') {
-      // 미국 모드: 달러 잔고 표시
-      if (fetchingUsd && cashUsd === 0) {
+      // 미국 모드: 달러 잔고 + 통합증거금 원화 표시
+      if (fetchingUsd && cashUsd === 0 && cashKrwForUs === 0) {
         cashEl.textContent = '조회 중…';
       } else if (cashUsd > 0) {
         cashEl.textContent = `$${cashUsd.toFixed(2)} (≈${fmtPrice(Math.round(cashUsd * STATE.usdKrw))}원)`;
+      } else if (cashKrwForUs > 0) {
+        // 통합증거금: 달러=0이지만 원화로 매수 가능
+        cashEl.textContent = `${fmtPrice(cashKrwForUs)}원 (통합증거금)`;
       } else if (hasQueried) {
         cashEl.textContent = '$0.00 (잔고 없음)';
       } else {
@@ -2315,8 +2338,8 @@ function updateStatsUI() {
     } else if (mkt === 'BOTH') {
       // BOTH 모드: 원화 + 달러 합산
       const krPart = cash > 0 ? fmtPrice(cash) + '원' : '';
-      const usPart = cashUsd > 0 ? `$${cashUsd.toFixed(0)}` : '';
-      if ((fetching || fetchingUsd) && cash === 0 && cashUsd === 0 && !hasQueried) {
+      const usPart = cashUsd > 0 ? `$${cashUsd.toFixed(0)}` : (cashKrwForUs > 0 ? `${fmtPrice(cashKrwForUs)}원(통합증거금)` : '');
+      if ((fetching || fetchingUsd) && cash === 0 && cashUsd === 0 && cashKrwForUs === 0 && !hasQueried) {
         cashEl.textContent = '조회 중…';
       } else if (krPart || usPart) {
         cashEl.textContent = [krPart, usPart].filter(Boolean).join(' / ');
