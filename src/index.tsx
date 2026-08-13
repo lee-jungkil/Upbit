@@ -650,9 +650,15 @@ app.post('/api/kis/us/order', async (c) => {
         CANO: cano, ACNT_PRDT_CD: acntPrdtCd,
         OVRS_EXCG_CD: exchCd,
         PDNO: symbol,
-        ORD_DVSN: '00',          // 00=지정가 (미국은 지정가만)
+        // ── 주문구분 ──
+        // 매수: 00=지정가 (TTTT1002U)
+        // 매도: 00=지정가 (TTTT1006U) — price를 현재가 이하로 설정해야 즉시체결
+        //       31=MOO(장시작시장가), 33=MOC(장마감시장가) — 자동화봇은 지정가 즉시체결 방식 사용
+        ORD_DVSN: '00',
         ORD_QTY: String(qty),
-        OVRS_ORD_UNPR: String(price), // 주문 단가 (달러)
+        // 매도 시: 전달된 price(현재가×슬리피지 적용 하향가)를 그대로 사용
+        // → 현재가보다 낮은 지정가 매도는 KIS에서 즉시 체결됨
+        OVRS_ORD_UNPR: String(price),
         ORD_SVR_DVSN_CD: '0',
       }),
       // @ts-ignore

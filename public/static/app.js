@@ -1451,8 +1451,15 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
   const slip = slippagePct || 0.05;
   const isUs = pos.market === 'US';
   // 슬리피지 적용 체결가
+  // ⚠️ 미국주식 매도 지정가 즉시체결 원리:
+  //   - KIS 미국주식은 ORD_DVSN=00(지정가)만 지원 (정규장 기준)
+  //   - 매도 지정가 ≤ 현재 매수호가 → 즉시 체결
+  //   - 매도 지정가 > 현재 매수호가 → 미체결 대기 (이게 문제였음!)
+  //   - 따라서 현재가보다 낮게 설정해야 즉시 체결됨
+  //   - 미국주식은 슬리피지를 더 크게(0.1%) 설정해서 반드시 즉시 체결 보장
+  const usExitSlip = Math.max(slip, 0.1); // 미국주식 매도 최소 슬리피지 0.1%
   const actualExitPrice = isUs
-    ? Math.round(pos.currentPrice * (1 - slip / 100) * 100) / 100  // 달러 소수점 2자리
+    ? Math.round(pos.currentPrice * (1 - usExitSlip / 100) * 100) / 100  // 달러: 현재가보다 낮은 지정가 (즉시체결)
     : Math.round(pos.currentPrice * (1 - slip / 100));              // 원화 정수
   const investAmt  = pos.entryPrice * pos.qty;
   const profitAmt  = Math.round(investAmt * netPnlPct / 100);
@@ -1472,7 +1479,7 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
             appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo,
             symbol: pos.ticker, excd,
             side: 'sell', qty: pos.qty,
-            price: actualExitPrice.toFixed(2), // 달러 지정가
+            price: actualExitPrice.toFixed(2), // 달러 지정가 (현재가 이하 → 즉시체결)
           }),
         });
         const data = await res.json();
@@ -1481,6 +1488,8 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
           const detail = data.trId ? ` [trId:${data.trId} excd:${data.exchCd} hhmm:${data.hhmm}]` : '';
           throw new Error((data.error || JSON.stringify(data)) + detail);
         }
+        // ✅ 매도 주문 접수 성공 로그 (주문번호 + 주문가 명시)
+        addLog('info', `📤 미국 매도 접수: ${pos.ticker} ${pos.qty}주 @$${actualExitPrice.toFixed(2)} [ordNo:${data.ordNo || '-'} trId:${data.trId}]`);
       } else {
         // 국내주식 매도
         const res = await fetch('/api/kis/order', {
@@ -1499,6 +1508,8 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
           const trInfo = data.trId   ? ` [trId:${data.trId}]`  : '';
           throw new Error((data.error || JSON.stringify(data)) + rtCd + trInfo + hint);
         }
+        // ✅ 국내 매도 주문 접수 성공 로그
+        addLog('info', `📤 국내 매도 접수: ${pos.ticker} ${pos.qty}주 @${fmtPrice(actualExitPrice)}원 [ordNo:${data.ordNo || '-'}]`);
       }
     } catch(e) {
       addLog('error', `❌ 매도 실패: ${pos.ticker} — ${e.message}`);
