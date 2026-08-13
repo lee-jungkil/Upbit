@@ -139,11 +139,17 @@ function loadSavedKeys() {
 }
 
 function saveApiKeys() {
-  const k = document.getElementById('input-app-key').value.trim();
-  const s = document.getElementById('input-app-secret').value.trim();
+  let k = document.getElementById('input-app-key').value.trim();
+  let s = document.getElementById('input-app-secret').value.trim();
   const a = document.getElementById('input-account-no').value.trim();
-  if (!k || k === '●●●●●●●●') { showApiResult('⚠️ APP KEY를 입력하세요', 'warn'); return; }
-  if (!s || s === '●●●●●●●●') { showApiResult('⚠️ APP SECRET를 입력하세요', 'warn'); return; }
+
+  // 마스킹 값(●)이면 기존 저장 키를 유지 (계좌번호만 바꿀 때 KEY 재입력 불필요)
+  const isMasked = (v) => !v || /^●+$/.test(v);
+  if (isMasked(k)) k = KEYS.appKey;
+  if (isMasked(s)) s = KEYS.appSecret;
+
+  if (!k) { showApiResult('⚠️ APP KEY를 입력하세요', 'warn'); return; }
+  if (!s) { showApiResult('⚠️ APP SECRET를 입력하세요', 'warn'); return; }
   KEYS.save(k, s, a);
   showApiResult('✅ 저장 완료 (새로고침 후에도 유지됨)', 'ok');
   addLog('info', '🔑 API 키 저장 완료 (localStorage — 영구 보관)');
@@ -202,10 +208,17 @@ async function getKisToken() {
 
 async function testApiConnection() {
   showApiResult('🔄 서버 프록시로 KIS 연결 테스트 중...', 'info');
-  const k = document.getElementById('input-app-key').value.trim();
-  const s = document.getElementById('input-app-secret').value.trim();
-  if (!k || k === '●●●●●●●●' || !s || s === '●●●●●●●●') {
-    showApiResult('⚠️ APP KEY와 APP SECRET를 먼저 입력하세요', 'warn'); return;
+  let k = document.getElementById('input-app-key').value.trim();
+  let s = document.getElementById('input-app-secret').value.trim();
+
+  // 마스킹 값(●)이면 localStorage의 실제 저장 키를 사용
+  // — 모달 재오픈 시 항상 ●●●●●●●●로 표시되므로 saved key로 폴백
+  const isMasked = (v) => !v || /^●+$/.test(v);
+  if (isMasked(k)) k = KEYS.appKey;
+  if (isMasked(s)) s = KEYS.appSecret;
+
+  if (!k || !s) {
+    showApiResult('⚠️ APP KEY와 APP SECRET를 먼저 입력 후 저장하세요', 'warn'); return;
   }
 
   // ── 1단계: 네이버 프록시 테스트 (항상 가능) ──
@@ -235,7 +248,8 @@ async function testApiConnection() {
       addLog('info', '✅ KIS 연결 성공 — 서버 프록시 모드 (실전 모드 사용 가능)');
 
       // 실전 모드 + 계좌번호 있으면 즉시 잔고 조회 (저장 전이라도 현재 입력된 계좌번호로 조회)
-      const a = document.getElementById('input-account-no').value.trim();
+      const aInput = document.getElementById('input-account-no').value.trim();
+      const a = aInput || KEYS.accountNo; // 빈칸이면 저장된 계좌번호 폴백
       if (STATE.mode === 'live' && a) {
         // 현재 입력된 키/계좌로 임시 조회 (저장 여부와 무관)
         setTimeout(async () => {
