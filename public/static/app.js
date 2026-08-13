@@ -148,11 +148,20 @@ function saveApiKeys() {
   if (isMasked(k)) k = KEYS.appKey;
   if (isMasked(s)) s = KEYS.appSecret;
 
+  // 공백/탭/개행 완전 제거 (복붙 시 보이지 않는 공백 포함)
+  k = k.replace(/\s/g, '');
+  s = s.replace(/\s/g, '');
+
   if (!k) { showApiResult('⚠️ APP KEY를 입력하세요', 'warn'); return; }
   if (!s) { showApiResult('⚠️ APP SECRET를 입력하세요', 'warn'); return; }
+
+  // 키 형식 기본 검증 (KIS APP KEY는 보통 36자)
+  if (k.length < 10) { showApiResult('⚠️ APP KEY가 너무 짧습니다 (복사 오류 확인)', 'warn'); return; }
+  if (s.length < 10) { showApiResult('⚠️ APP SECRET가 너무 짧습니다 (복사 오류 확인)', 'warn'); return; }
+
   KEYS.save(k, s, a);
-  showApiResult('✅ 저장 완료 (새로고침 후에도 유지됨)', 'ok');
-  addLog('info', '🔑 API 키 저장 완료 (localStorage — 영구 보관)');
+  showApiResult(`✅ 저장 완료 — KEY: ${k.slice(0,4)}...${k.slice(-4)} (${k.length}자)`, 'ok');
+  addLog('info', `🔑 API 키 저장 완료 — APP KEY ${k.slice(0,4)}...${k.slice(-4)} (${k.length}자)`);
   // 실전 모드 상태면 즉시 잔고 재조회
   if (STATE.mode === 'live' && a) {
     setTimeout(() => {
@@ -217,9 +226,16 @@ async function testApiConnection() {
   if (isMasked(k)) k = KEYS.appKey;
   if (isMasked(s)) s = KEYS.appSecret;
 
+  // 공백/탭/개행 완전 제거
+  k = k.replace(/\s/g, '');
+  s = s.replace(/\s/g, '');
+
   if (!k || !s) {
     showApiResult('⚠️ APP KEY와 APP SECRET를 먼저 입력 후 저장하세요', 'warn'); return;
   }
+
+  // 진단 로그: 어떤 키로 테스트하는지 출력
+  addLog('info', `🔍 테스트 키: ${k.slice(0,4)}...${k.slice(-4)} (${k.length}자) / SECRET: ...${s.slice(-4)} (${s.length}자)`);
 
   // ── 1단계: 네이버 프록시 테스트 (항상 가능) ──
   try {
@@ -284,8 +300,13 @@ async function testApiConnection() {
       showApiResult('⚠️ KIS 서버 연결 OK — 키 인증 실패. APP KEY/SECRET을 확인하세요', 'warn');
       addLog('warn', '⚠️ KIS 서버 연결 성공, 하지만 인증 실패');
       addLog('warn', `   오류: ${data.error || ''}`);
-      addLog('info', '💡 KIS Developers(apiportal.koreainvestment.com)에서 APP KEY/SECRET을 확인하세요');
-      addLog('info', '   네이버 시세 연동은 정상 — 키 수정 후 다시 테스트하세요');
+      // 진단: 실제 사용된 키 앞 4자리 표시 (키가 맞는지 확인용)
+      addLog('info', `🔍 진단 — 사용된 APP KEY: ${k.slice(0, 4)}...${k.slice(-4)} (총 ${k.length}자)`);
+      addLog('info', `🔍 진단 — localStorage 저장 키: ${KEYS.appKey ? KEYS.appKey.slice(0,4) + '...' + KEYS.appKey.slice(-4) + ' (' + KEYS.appKey.length + '자)' : '없음'}`);
+      addLog('info', '💡 해결 방법:');
+      addLog('info', '   1. API 설정 열기 → APP KEY/SECRET 직접 다시 입력 → 저장');
+      addLog('info', '   2. KIS Developers(apiportal.koreainvestment.com) → 앱 관리 → 키 확인');
+      addLog('info', '   3. 모의투자 키 vs 실전투자 키 혼용 여부 확인');
     } else if (data.serverBlocked) {
       // ⛔ 서버→KIS 네트워크 연결 자체가 안 됨
       showApiResult('⚠️ 서버→KIS 네트워크 차단 — 아래 안내를 확인하세요', 'warn');
