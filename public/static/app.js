@@ -1710,28 +1710,36 @@ async function generateUsCandidates() {
         if (STATE.liveBalanceUsdTs === 0) STATE.liveBalanceUsdTs = Date.now();
         return generateUsSimCandidates(strategy, ap);
       }
-      // ── 잔고 결과 처리 (같은 토큰으로 동시 조회됨 — 토큰 추가 발급 없음)
-      if (data.balance && data.balance.cashUsd >= 0) {
+      // ── 잔고 처리: 통합증거금 — 원화만 사용 (달러 불필요)
+      // cashKrw > 0 이면 liveBalance 갱신, 0이면 manual_krw_balance 폴백
+      if (data.balance) {
         const bal = data.balance;
-        STATE.liveBalanceUsd    = bal.cashUsd;
-        STATE.liveBalanceUsdTs  = Date.now();
-        STATE.liveBalanceUsdFetching = false;
-        if (bal.cashKrw > 0) {
-          STATE.liveBalanceKrwForUs = bal.cashKrw;
-          addLog('info', `💴 통합증거금 원화 잔고 수신: ${fmtPrice(bal.cashKrw)}원`);
+        const krw = bal.cashKrw || 0;
+        if (krw > 0) {
+          STATE.liveBalance         = krw;
+          STATE.liveBalanceTs       = Date.now();
+          STATE.liveBalanceKrwForUs = krw;
+          addLog('info', `💴 통합증거금 원화 잔고: ${fmtPrice(krw)}원`);
         } else {
-          // cashKrw=0: 서버 응답은 왔지만 원화 가용금액 0 (또는 필드 없음)
-          // 수동 입력값이 있으면 유지
-          addLog('info', `💵 미국 달러 잔고: $${bal.cashUsd.toFixed(2)} | 통합증거금 원화: ${bal.cashKrw ?? 'N/A'}원`);
-          if (STATE.liveBalanceKrwForUs > 0) {
-            addLog('info', `💴 수동 설정 원화 잔고 유지: ${fmtPrice(STATE.liveBalanceKrwForUs)}원`);
+          // 서버에서 원화 잔고 못 받음 → manual_krw_balance 폴백
+          const manual = parseInt(localStorage.getItem('manual_krw_balance') || '0');
+          if (manual > 0 && STATE.liveBalance <= 0) {
+            STATE.liveBalance         = manual;
+            STATE.liveBalanceTs       = Date.now();
+            STATE.liveBalanceKrwForUs = manual;
           }
         }
-        updateStatsUI();
-      } else if (!data.balance) {
-        // 잔고 조회 실패(서버 차단 등) → ts는 갱신, 수동 입력값 유지
         STATE.liveBalanceUsdTs = Date.now();
-        addLog('warn', `⚠️ 미국주식 잔고 서버 조회 실패 — 수동 입력 잔고 사용 (${fmtPrice(STATE.liveBalanceKrwForUs)}원)`);
+        updateStatsUI();
+      } else {
+        // 잔고 응답 없음 → manual_krw_balance 폴백
+        const manual = parseInt(localStorage.getItem('manual_krw_balance') || '0');
+        if (manual > 0 && STATE.liveBalance <= 0) {
+          STATE.liveBalance         = manual;
+          STATE.liveBalanceTs       = Date.now();
+          STATE.liveBalanceKrwForUs = manual;
+        }
+        STATE.liveBalanceUsdTs = Date.now();
       }
       const rawResults = data.results || [];
       // US_STOCKS 메타(name) 병합
@@ -1843,21 +1851,16 @@ async function executeEntry(candidate) {
     }
     available = STATE.paperBalance;
   } else {
-    // ── 실전: 국내·미국 모두 원화 잔고만 사용 (통합증거금 — 달러 완전 불필요)
-    // 우선순위: ① STATE.liveBalance(캐시) ② manual_krw_balance(localStorage)
+    // ── 실전: 통합증거금 — 원화 잔고만 사용 (달러 완전 불필요)
+    // 우선순위: ① STATE.liveBalance ② manual_krw_balance(localStorage)
     const manualKrw = parseInt(localStorage.getItem('manual_krw_balance') || '0');
-
-    // STATE.liveBalance가 0이지만 manual_krw_balance가 있으면 즉시 복원
     if (STATE.liveBalance <= 0 && manualKrw > 0) {
-      STATE.liveBalance        = manualKrw;
-      STATE.liveBalanceTs      = Date.now();
+      STATE.liveBalance         = manualKrw;
+      STATE.liveBalanceTs       = Date.now();
       STATE.liveBalanceKrwForUs = manualKrw;
     }
-
-    if (STATE.liveBalance > 0) {
-      available = STATE.liveBalance;
-    } else {
-      // 잔고 없음 — 스캔은 계속하되 매수 건너뜀 (경고는 봇 전체에서 1회만)
+    available = STATE.liveBalance;
+    if (available <= 0) {
       if (!STATE._balWarnedOnce) {
         STATE._balWarnedOnce = true;
         addLog('warn', '⚠️ 실전 원화 잔고 없음 — 총자산 카드 ✏️ 버튼으로 잔고를 입력하세요');
@@ -1866,15 +1869,11 @@ async function executeEntry(candidate) {
       return;
     }
   }
+  STATE._balWarnedOnce = false;
   if (available < 10000) {
-    if (!STATE._balWarnedOnce) {
-      STATE._balWarnedOnce = true;
-      addLog('warn', `⚠️ 가용 자금 부족: ${fmtPrice(available)}원 — 총자산 카드 ✏️ 버튼으로 잔고를 입력하세요`);
-      openBalanceInput();
-    }
+    addLog('warn', `⚠️ 가용 자금 부족: ${fmtPrice(available)}원`);
     return;
   }
-  STATE._balWarnedOnce = false; // 잔고 정상이면 플래그 초기화
 
   // ── 포지션 금액 계산 ───────────────────────────────────
   const posMin     = STATE.config.posMinAmt  || 50000;
