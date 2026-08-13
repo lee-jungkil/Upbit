@@ -548,8 +548,8 @@ app.post('/api/kis/us/order', async (c) => {
     // ── tr_id: 시간대 × 거래소 × 매수/매도 자동 선택 ──
     // 한국투자증권 미국주식 거래 시간대 (한국시간 기준, 서머타임 무시 — 넉넉히 구분):
     //   프리마켓(야간장) : 18:00 ~ 23:29  → TTTS0308U(NASD매수) / TTTS0305U(NYSE매수) 등
-    //   정규장           : 23:30 ~ 06:00  → JTTT1002U(매수) / JTTT1006U(매도) — 거래소 무관
-    //   주간거래(장전)    : 10:00 ~ 17:59  → JTTT1002U(매수) / JTTT1006U(매도)
+    //   정규장           : 23:30 ~ 06:00  → TTTT1002U(매수) / TTTT1006U(매도) — 거래소 무관
+    //   주간거래(장전)    : 10:00 ~ 17:59  → TTTT1002U(매수) / TTTT1006U(매도)
     //
     // ※ 서머타임 적용 시 정규장이 22:30부터 시작하지만, KIS는 23:30을 기준으로 API tr_id를
     //   구분하므로 서버에서는 23:30 고정 기준으로 처리.
@@ -558,7 +558,7 @@ app.post('/api/kis/us/order', async (c) => {
     const hhmm = nowKst.getUTCHours() * 100 + nowKst.getUTCMinutes()
 
     // 프리마켓(야간장): 18:00~23:29 → TTTS 계열
-    // 정규장 + 주간장:  23:30~06:00 + 10:00~17:59 → JTTT 계열
+    // 정규장 + 주간장:  23:30~06:00 + 10:00~17:59 → TTTT 계열
     const isPremarket = (hhmm >= 1800 && hhmm < 2330)
 
     let trId: string
@@ -574,8 +574,8 @@ app.post('/api/kis/us/order', async (c) => {
       }
     } else {
       // 정규장(23:30~06:00) + 주간거래(10:00~17:59): 거래소 무관
-      // 매수=JTTT1002U, 매도=JTTT1006U
-      trId = side === 'buy' ? 'JTTT1002U' : 'JTTT1006U'
+      // 매수=TTTT1002U, 매도=TTTT1006U
+      trId = side === 'buy' ? 'TTTT1002U' : 'TTTT1006U'
     }
 
     const res = await fetch('https://openapi.koreainvestment.com:9443/uapi/overseas-stock/v1/trading/order', {
@@ -1284,7 +1284,7 @@ app.get('/', (c) => {
   </div>
 </div>
 
-<script src="/static/app.1786639170.js"></script>
+<script src="/static/app.1786639571.js"></script>
 </body>
 </html>`)
 })
