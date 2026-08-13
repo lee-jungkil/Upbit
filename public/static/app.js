@@ -1502,6 +1502,7 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
       }
     } catch(e) {
       addLog('error', `❌ 매도 실패: ${pos.ticker} — ${e.message}`);
+      return; // ← 매도 API 실패 시 즉시 종료 (잔고복원·기록 하지 않음)
     }
     // ── 실전: 매도 성공 → liveBalance 즉시 복원 (매도대금 반영) ──
     // profitAmt는 원화 기준 손익, investAmt = entryPrice * qty (원화 환산)
@@ -1510,6 +1511,11 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
     const returnAmt = investAmtKrw + profitAmtKrw2;
     STATE.liveBalance         += returnAmt;
     STATE.liveBalanceKrwForUs += returnAmt;
+    // ── liveTotalAsset 즉시 갱신: 매도손익 반영 (현금+주식 합계 변화) ──
+    if (STATE.liveTotalAsset > 0) {
+      const profitAmtKrw3 = isUs ? Math.round(profitAmt * STATE.usdKrw) : profitAmt;
+      STATE.liveTotalAsset += profitAmtKrw3; // 손익만큼 총자산 변동 (원금은 현금↔주식 이동이라 중립)
+    }
   } else {
     // 페이퍼: 현금 반환 (국내·미국 모두 원화)
     STATE.paperBalance += Math.round(investAmt + profitAmt);
