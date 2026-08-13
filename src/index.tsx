@@ -512,7 +512,8 @@ app.post('/api/kis/us/balance', async (c) => {
       return c.json({ error: tokErr || '토큰 실패', serverBlocked: !!networkError }, networkError ? 503 : 401)
     }
     const [cano, acntPrdtCd] = accountNo.split('-')
-    const url = `https://openapi.koreainvestment.com:9443/uapi/overseas-stock/v1/trading/inquire-balance?CANO=${cano}&ACNT_PRDT_CD=${acntPrdtCd}&OVRS_EXCG_CD=NASD&TR_CRCY_CD=USD&CTX_AREA_FK200=&CTX_AREA_NK200=`
+    // OVRS_EXCG_CD='' → 전체 거래소(NASD+NYSE+AMEX) 보유종목 한 번에 조회
+    const url = `https://openapi.koreainvestment.com:9443/uapi/overseas-stock/v1/trading/inquire-balance?CANO=${cano}&ACNT_PRDT_CD=${acntPrdtCd}&OVRS_EXCG_CD=&TR_CRCY_CD=USD&CTX_AREA_FK200=&CTX_AREA_NK200=`
     const res = await fetch(url, {
       headers: {
         authorization: `Bearer ${token}`,
