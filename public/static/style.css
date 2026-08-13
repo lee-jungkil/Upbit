@@ -36,6 +36,22 @@ body {
   border-color: #dc2626 !important;
 }
 
+/* 시장 선택 버튼 */
+.market-btn {
+  background: #1f2937;
+  color: #9ca3af;
+  border: 1px solid #374151;
+}
+.market-btn:hover {
+  background: #374151;
+  color: #e5e7eb;
+}
+.active-market {
+  background: #065f46 !important;
+  color: #6ee7b7 !important;
+  border-color: #10b981 !important;
+}
+
 /* 로그 라인 */
 .log-info    { color: #86efac; }
 .log-warn    { color: #fde68a; }

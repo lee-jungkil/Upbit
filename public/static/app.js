@@ -1,41 +1,54 @@
 // ============================================================
-// StockBot - 한국 주식 자동매매 웹앱
-// KIS (한국투자증권) API 연동
+// StockBot - 한국/미국 주식 자동매매 웹앱
+// KIS (한국투자증권) API 연동 — 국내 + 미국주식 지원
 // ============================================================
 
 // ─── 전역 상태 ───────────────────────────────────────────────
 const STATE = {
   running: false,
   mode: 'paper',           // 'paper' | 'live'
+  market: 'KR',           // 'KR'=국내 | 'US'=미국 | 'BOTH'=국내+미국 동시
   strategy: 'scalping',
-  positions: [],           // [{ticker, name, entryPrice, qty, entryTime, currentPrice, pnlPct}]
+  positions: [],           // [{ticker, name, entryPrice, qty, entryTime, currentPrice, pnlPct, market}]
   stats: { totalTrades: 0, winTrades: 0, totalProfit: 0, dailyProfit: 0 },
   config: {
     maxPositions: 3,
-    positionSizeRatio: 0.30,   // 레거시 (사용 안 함, 호환성 보존)
+    positionSizeRatio: 0.30,
     profitTarget: 1.5,
     stopLoss: 1.0,
     scanInterval: 30,
     paperCapital: 5000000,
-    posMinAmt: 50000,          // 포지션 최솟값 (원)
-    posMaxAmt: 150000,         // 포지션 최댓값 (원, 상한율 적용 전 기본)
-    posCapMult: 1.0,           // 상한율 배수 (1.0 ~ 5.0)
+    posMinAmt: 50000,
+    posMaxAmt: 150000,
+    posCapMult: 1.0,
+    // 미국주식 전용
+    usRatio: 0.5,          // BOTH 모드에서 미국주식 자본 비중 (0.0~1.0)
   },
-  paperBalance: 5000000,   // 페이퍼 가용 현금
+  paperBalance: 5000000,   // 페이퍼 가용 현금 (원화)
+  paperBalanceUsd: 0,      // 페이퍼 달러 잔고 (BOTH/US 모드)
   scanTimer: null,
   nextScanIn: 0,
   countdownTimer: null,
-  profitHistory: [],       // [{time, cumProfit}]
-  candidates: [],          // 최근 스캔 후보
-  // ── 적응형 진입 조건 ───────────────────────────────────
-  adaptiveMode: 1,         // 0=공격 1=기본 2=방어 3=대기
-  recentResults: [],       // 최근 10회 거래 결과 [{win:bool, pnlPct}]
+  profitHistory: [],
+  candidates: [],
+  adaptiveMode: 1,
+  recentResults: [],
   // ── 실전 잔고 캐시 ─────────────────────────────────────
-  liveBalance: 0,           // 마지막 조회된 실전 현금 잔고
-  liveBalanceTs: 0,         // 마지막 잔고 조회 타임스탬프 (ms)
-  liveBalanceFetching: false, // 잔고 조회 중 여부 (중복 호출 방지)
+  liveBalance: 0,
+  liveBalanceTs: 0,
+  liveBalanceFetching: false,
+  // ── 미국주식 잔고 캐시 ─────────────────────────────────
+  liveBalanceUsd: 0,       // 달러 현금 잔고
+  liveBalanceUsdTs: 0,
+  liveBalanceUsdFetching: false,
+  // ── 환율 캐시 ──────────────────────────────────────────
+  usdKrw: 1380,            // 원/달러 환율 (기본값)
+  usdKrwTs: 0,             // 환율 마지막 조회
+  // ── 장 마감 청산 플래그 ────────────────────────────────
+  krCloseAlertSent: false,   // 국내 장마감 30분 전 청산 알림 발송 여부
+  usCloseAlertSent: false,   // 미국 장마감 30분 전 청산 알림 발송 여부
   // ── 내부 플래그 ────────────────────────────────────────
-  _lastMarketClosedLog: 0, // 장 외 안내 로그 마지막 출력 타임스탬프
+  _lastMarketClosedLog: 0,
 };
 
 // API 키 (세션 스토리지)
@@ -233,10 +246,9 @@ function setMode(mode) {
       addLog('info', '   ∙ 주문 실행: 서버 프록시(/api/kis/order) 경유');
       addLog('info', '   ⚠️ 로컬 환경에서는 주문이 차단될 수 있습니다 — 연결 테스트 먼저 권장');
       // ── 실전 전환 즉시 잔고 조회 시작 ─────────────────
-      STATE.liveBalanceTs = 0; // 캐시 무효화 → 다음 tick에서 즉시 조회
+      STATE.liveBalanceTs = 0;
       const cashEl = document.getElementById('stat-cash');
       if (cashEl) cashEl.textContent = '조회 중…';
-      // 5초 tick 기다리지 않고 즉시 한 번 조회
       if (KEYS.accountNo && !STATE.liveBalanceFetching) {
         STATE.liveBalanceFetching = true;
         getLiveBalance().then(bal => {
@@ -247,13 +259,70 @@ function setMode(mode) {
           updateStatsUI();
         }).catch(() => { STATE.liveBalanceFetching = false; });
       }
+      // 미국 모드면 달러 잔고도 조회
+      if (STATE.market === 'US' || STATE.market === 'BOTH') {
+        triggerUsdBalanceFetch();
+      }
     }
   } else {
-    // 페이퍼로 전환 시 실전 잔고 캐시 초기화
     STATE.liveBalance = 0;
     STATE.liveBalanceTs = 0;
+    STATE.liveBalanceUsd = 0;
+    STATE.liveBalanceUsdTs = 0;
   }
   renderStrategyConditions();
+}
+
+// ─── 시장 선택 (국내 / 미국 / 국내+미국) ─────────────────────
+function setMarket(market) {
+  STATE.market = market; // 'KR' | 'US' | 'BOTH'
+  localStorage.setItem('bot_market', market);
+
+  // 버튼 활성 상태 업데이트
+  ['KR', 'US', 'BOTH'].forEach(m => {
+    const el = document.getElementById('market-' + m);
+    if (el) el.classList.toggle('active-market', m === market);
+  });
+
+  // 시장별 안내 로그
+  if (market === 'KR') {
+    addLog('info', '🇰🇷 국내주식 모드 — 코스피/코스닥 정규장 (09:00~15:30)');
+    // 미국 잔고 캐시 초기화
+    STATE.liveBalanceUsd = 0;
+    STATE.liveBalanceUsdTs = 0;
+  } else if (market === 'US') {
+    addLog('info', '🇺🇸 미국주식 모드 — 야간 정규장 (23:30~06:00 KST)');
+    addLog('info', '   ∙ 지정가 주문만 지원 (KIS API 제약)');
+    addLog('info', '   ∙ 달러 지정가로 주문, 잔고는 달러 표시');
+    // 미국 잔고 즉시 조회
+    if (STATE.mode === 'live') triggerUsdBalanceFetch();
+  } else if (market === 'BOTH') {
+    addLog('info', '🌏 국내+미국 동시 모드');
+    addLog('info', `   ∙ 자본 배분: 미국 ${Math.round(STATE.config.usRatio * 100)}% / 국내 ${Math.round((1-STATE.config.usRatio)*100)}%`);
+    if (STATE.mode === 'live') triggerUsdBalanceFetch();
+  }
+
+  // 환율 패널 표시 여부
+  const fxPanel = document.getElementById('fx-panel');
+  if (fxPanel) fxPanel.classList.toggle('hidden', market === 'KR');
+
+  // 환율 최신화
+  if (market !== 'KR') fetchUsdKrw();
+
+  updateMarketStatus();
+  updateStatsUI();
+}
+
+function triggerUsdBalanceFetch() {
+  if (!KEYS.appKey || !KEYS.accountNo || STATE.liveBalanceUsdFetching) return;
+  STATE.liveBalanceUsdFetching = true;
+  getUsLiveBalance().then(usd => {
+    STATE.liveBalanceUsd    = usd;
+    STATE.liveBalanceUsdTs  = Date.now();
+    STATE.liveBalanceUsdFetching = false;
+    if (usd > 0) addLog('info', `💵 미국주식 달러 잔고: $${usd.toFixed(2)} (≈${fmtPrice(Math.round(usd * STATE.usdKrw))}원)`);
+    updateStatsUI();
+  }).catch(() => { STATE.liveBalanceUsdFetching = false; });
 }
 
 function updateSlider(id, labelId, suffix) {
@@ -475,6 +544,17 @@ function loadConfig() {
       Object.assign(STATE.config, c);
     } catch(e) {}
   }
+  // market 복원
+  const savedMarket = localStorage.getItem('bot_market') || 'KR';
+  STATE.market = savedMarket;
+  ['KR','US','BOTH'].forEach(m => {
+    const el = document.getElementById('market-' + m);
+    if (el) el.classList.toggle('active-market', m === savedMarket);
+  });
+  // 환율 패널 표시 여부
+  const fxPanel = document.getElementById('fx-panel');
+  if (fxPanel) fxPanel.classList.toggle('hidden', savedMarket === 'KR');
+
   const p  = STATE.config.profitTarget;
   const sl = STATE.config.stopLoss;
   const mp = STATE.config.maxPositions;
@@ -814,6 +894,21 @@ async function startBot() {
   STATE.running = true;
   STATE.paperBalance = STATE.config.paperCapital;
 
+  // US / BOTH 모드: 페이퍼 달러 잔고 초기화
+  // 자본금의 usRatio 비율만큼 달러로 배분 (원화→달러 환산)
+  if (STATE.mode === 'paper') {
+    if (STATE.market === 'US') {
+      STATE.paperBalanceUsd = STATE.config.paperCapital / STATE.usdKrw;
+      STATE.paperBalance = 0; // US 모드는 원화 잔고 불필요
+      addLog('info', `💵 페이퍼 달러 잔고 초기화: $${STATE.paperBalanceUsd.toFixed(2)} (환율 ${fmtPrice(STATE.usdKrw)}원/달러)`);
+    } else if (STATE.market === 'BOTH') {
+      const usdPart = STATE.config.paperCapital * STATE.config.usRatio;
+      STATE.paperBalanceUsd = usdPart / STATE.usdKrw;
+      STATE.paperBalance = STATE.config.paperCapital * (1 - STATE.config.usRatio);
+      addLog('info', `🌏 페이퍼 자본 배분: 국내 ${fmtManwon(STATE.paperBalance)} / 미국 $${STATE.paperBalanceUsd.toFixed(2)}`);
+    }
+  }
+
   const btn = document.getElementById('bot-toggle-btn');
   btn.innerHTML = '<i class="fas fa-stop mr-2"></i> 봇 정지';
   btn.className = 'w-full py-3 rounded-lg text-base font-bold transition bg-red-600 hover:bg-red-700';
@@ -879,27 +974,66 @@ function scheduleNextScan() {
 
 // ─── 메인 스캔 로직 ───────────────────────────────────────────
 async function runScan() {
-  const marketOpen = isMarketOpen();
-  const modeName   = STATE.mode === 'paper' ? '페이퍼' : '실전';
+  const mkt = STATE.market;
+  const krOpen = isKrMarketOpen();
+  const usOpen = isUsMarketOpen();
+  const anyOpen = isMarketOpen();
+  const modeName = STATE.mode === 'paper' ? '페이퍼' : '실전';
+  const mktLabel = { KR: '🇰🇷국내', US: '🇺🇸미국', BOTH: '🌏국내+미국' }[mkt] || mkt;
 
-  // ─ 장 외 시간 안내 (처음 1회만 로그 출력 — 반복 스팸 방지)
-  if (!marketOpen && STATE.mode === 'live') {
+  // ── 장 마감 전 30분: 자동 청산 경고 + 실행 ─────────────────
+  if (STATE.mode !== 'paper') {
+    // 국내 마감 30분 전 (KR or BOTH)
+    if ((mkt === 'KR' || mkt === 'BOTH') && isKrMarketClosingSoon() && !STATE.krCloseAlertSent) {
+      STATE.krCloseAlertSent = true;
+      const krPos = STATE.positions.filter(p => p.market === 'KR' || !p.market);
+      if (krPos.length > 0) {
+        addLog('warn', `⏰ [국내] 장 마감 30분 전 (15:00) — 보유 ${krPos.length}개 포지션 자동 청산 시작`);
+        for (const pos of [...krPos]) {
+          await executeExit(pos, '장마감 전 청산', pos.pnlPct, 'close_eod', 0.05);
+        }
+        addLog('info', '✅ [국내] 장마감 전 청산 완료');
+      }
+    }
+    // 국내 장 열리면 플래그 초기화
+    if (krOpen) STATE.krCloseAlertSent = false;
+
+    // 미국 마감 30분 전 (US or BOTH)
+    if ((mkt === 'US' || mkt === 'BOTH') && isUsMarketClosingSoon() && !STATE.usCloseAlertSent) {
+      STATE.usCloseAlertSent = true;
+      const usPos = STATE.positions.filter(p => p.market === 'US');
+      if (usPos.length > 0) {
+        addLog('warn', `⏰ [미국] 장 마감 30분 전 (05:30 KST) — 보유 ${usPos.length}개 포지션 자동 청산 시작`);
+        for (const pos of [...usPos]) {
+          await executeExit(pos, '장마감 전 청산', pos.pnlPct, 'close_eod', 0.05);
+        }
+        addLog('info', '✅ [미국] 장마감 전 청산 완료');
+      }
+    }
+    // 미국 장 열리면 플래그 초기화
+    if (usOpen) STATE.usCloseAlertSent = false;
+  }
+
+  // ─ 장 외 시간 안내
+  if (!anyOpen && STATE.mode === 'live') {
     if (!STATE._lastMarketClosedLog || Date.now() - STATE._lastMarketClosedLog > 5 * 60 * 1000) {
-      addLog('warn', `⏸️  [실전] 장 외 시간 — 신규 진입 차단 (보유 포지션 청산 체크는 계속)`);
+      addLog('warn', `⏸️  [실전] 장 외 시간 — 신규 진입 차단 (다음: ${getNextOpenStr()})`);
       STATE._lastMarketClosedLog = Date.now();
     }
   }
 
   const stratName = (STATE.strategy || 'scalping').toUpperCase();
-  const timeStr   = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  addLog('scan', `🔍 [스캔 ${timeStr}] ${stratName} | ${modeName} | 장: ${marketOpen ? '🟢 정규장' : '⚫ 장 외'}`);
+  const timeStr = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const mktSt = (mkt==='KR') ? (krOpen?'🟢정규장':'⚫마감')
+              : (mkt==='US') ? (usOpen?'🔵야간장':'⚫마감')
+              : `KR:${krOpen?'🟢':'⚫'} US:${usOpen?'🔵':'⚫'}`;
+  addLog('scan', `🔍 [스캔 ${timeStr}] ${stratName} | ${modeName} | ${mktLabel} ${mktSt}`);
 
   // 1) 포지션 청산 체크 — 장 외에도 실행 (손절·트레일 보호)
   await checkPositionsForExit();
 
-  // 2) 신규 진입 — 정규장 시간에만 허용 (페이퍼 모드는 항상 허용)
-  const canEnter = STATE.mode === 'paper' || marketOpen;
-
+  // 2) 신규 진입 — 정규장 시간에만 허용 (페이퍼 모드는 항상)
+  const canEnter = STATE.mode === 'paper' || anyOpen;
   if (!canEnter) {
     addLog('scan', `   ⏸️  장 외 시간 — 신규 진입 차단 (${getNextOpenStr()} 개장 예정)`);
   } else if (STATE.positions.length < STATE.config.maxPositions) {
@@ -1024,71 +1158,95 @@ async function checkPositionsForExit() {
 // 매도 실행 (슬리피지 반영)
 async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
   const slip = slippagePct || 0.05;
-  // 실제 체결가 = 현재가에서 슬리피지만큼 불리하게 (매도 → 더 낮게)
-  const actualExitPrice = Math.round(pos.currentPrice * (1 - slip / 100));
+  const isUs = pos.market === 'US';
+  // 슬리피지 적용 체결가
+  const actualExitPrice = isUs
+    ? Math.round(pos.currentPrice * (1 - slip / 100) * 100) / 100  // 달러 소수점 2자리
+    : Math.round(pos.currentPrice * (1 - slip / 100));              // 원화 정수
   const investAmt  = pos.entryPrice * pos.qty;
   const profitAmt  = Math.round(investAmt * netPnlPct / 100);
   const isWin      = netPnlPct > 0;
 
   if (STATE.mode === 'live') {
     try {
-      const res = await fetch('/api/kis/order', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo,
-          ticker: pos.ticker, side: 'sell', qty: pos.qty,
-        }),
-      });
-      const data = await res.json();
-      if (data.serverBlocked) {
-        addLog('warn', `⚠️ 매도 서버 차단 — 실전 주문 불가. 페이지 배포 후 이용하세요: ${pos.ticker}`);
-        return; // 차단 시 포지션 상태 유지 (임의 청산하지 않음)
+      if (isUs) {
+        // 미국주식 매도
+        const excd = getUsExchangeCode(pos.ticker).replace('NAS','NASD').replace('NYS','NYSE');
+        const res = await fetch('/api/kis/us/order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo,
+            symbol: pos.ticker, excd,
+            side: 'sell', qty: pos.qty,
+            price: actualExitPrice.toFixed(2), // 달러 지정가
+          }),
+        });
+        const data = await res.json();
+        if (data.serverBlocked) { addLog('warn', `⚠️ 미국 매도 서버 차단: ${pos.ticker}`); return; }
+        if (!data.ok) throw new Error(data.error || JSON.stringify(data));
+      } else {
+        // 국내주식 매도
+        const res = await fetch('/api/kis/order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo,
+            ticker: pos.ticker, side: 'sell', qty: pos.qty,
+          }),
+        });
+        const data = await res.json();
+        if (data.serverBlocked) { addLog('warn', `⚠️ 매도 서버 차단: ${pos.ticker}`); return; }
+        if (!data.ok) throw new Error(data.error || JSON.stringify(data));
       }
-      if (!data.ok) throw new Error(data.error || JSON.stringify(data));
     } catch(e) {
       addLog('error', `❌ 매도 실패: ${pos.ticker} — ${e.message}`);
     }
   } else {
     // 페이퍼: 현금 반환
-    STATE.paperBalance += Math.round(investAmt + profitAmt);
+    if (isUs) {
+      STATE.paperBalanceUsd += investAmt + (investAmt * netPnlPct / 100);
+    } else {
+      STATE.paperBalance += Math.round(investAmt + profitAmt);
+    }
   }
 
   STATE.stats.totalTrades++;
   if (isWin) STATE.stats.winTrades++;
-  STATE.stats.totalProfit += profitAmt;
-  STATE.stats.dailyProfit += profitAmt;
+
+  // 손익 원화 환산 (미국주식은 달러→원화 환산)
+  const profitAmtKrw = isUs ? Math.round(profitAmt * STATE.usdKrw) : profitAmt;
+  STATE.stats.totalProfit += profitAmtKrw;
+  STATE.stats.dailyProfit += profitAmtKrw;
 
   STATE.profitHistory.push({ time: new Date().toLocaleTimeString('ko-KR', {hour:'2-digit',minute:'2-digit'}), cumProfit: STATE.stats.totalProfit });
   updateProfitChart();
 
   const icon  = isWin ? '✅' : '🚨';
   const color = isWin ? 'profit' : 'loss';
-  const typeLabel = { profit: '익절', loss: '손절', trail: '트레일', time: '시간청산' }[exitType] || '청산';
-  addLog(color, `${icon} [${typeLabel}] ${pos.name || pos.ticker} — ${reason}`);
-  addLog(color, `   진입 ${fmtPrice(pos.entryPrice)} → 현재가 ${fmtPrice(pos.currentPrice)} → 체결 ${fmtPrice(actualExitPrice)} (슬리피지 -${slip}%)`);
-  addLog(color, `   고점 +${(pos.peakPnl||0).toFixed(2)}% | 순손익 ${profitAmt > 0 ? '+' : ''}${fmtPrice(profitAmt)}원 (수수료+슬리피지 후 ${netPnlPct > 0 ? '+' : ''}${netPnlPct.toFixed(2)}%)`);
+  const typeLabel = { profit: '익절', loss: '손절', trail: '트레일', time: '시간청산', close_eod: '장마감청산' }[exitType] || '청산';
+  const mktFlag = isUs ? '🇺🇸' : '🇰🇷';
+  const priceStr = isUs
+    ? `$${pos.entryPrice.toFixed(2)} → $${actualExitPrice.toFixed(2)}`
+    : `${fmtPrice(pos.entryPrice)} → ${fmtPrice(actualExitPrice)}`;
+  const profitStr = isUs
+    ? `$${(investAmt * netPnlPct / 100).toFixed(2)} (≈${fmtPrice(profitAmtKrw)}원)`
+    : `${profitAmtKrw > 0 ? '+' : ''}${fmtPrice(profitAmtKrw)}원`;
 
-  // 거래 기록
+  addLog(color, `${icon} ${mktFlag} [${typeLabel}] ${pos.name || pos.ticker} — ${reason}`);
+  addLog(color, `   진입 ${priceStr} (슬리피지 -${slip}%)`);
+  addLog(color, `   고점 +${(pos.peakPnl||0).toFixed(2)}% | 순손익 ${profitStr} (${netPnlPct > 0 ? '+' : ''}${netPnlPct.toFixed(2)}%)`);
+
   await recordTrade({
-    ticker:     pos.ticker,
-    name:       pos.name || pos.ticker,
-    side:       'sell',
-    entryPrice: pos.entryPrice,
-    exitPrice:  actualExitPrice,
-    qty:        pos.qty,
-    pnlPct:     netPnlPct,
-    profitAmt,
-    peakPnl:    pos.peakPnl || 0,
-    slippage:   slip,
-    exitType,
-    reason,
-    timestamp:  new Date().toISOString(),
-    mode:       STATE.mode,
+    ticker: pos.ticker, name: pos.name || pos.ticker,
+    side: 'sell', entryPrice: pos.entryPrice, exitPrice: actualExitPrice,
+    qty: pos.qty, pnlPct: netPnlPct, profitAmt: profitAmtKrw,
+    peakPnl: pos.peakPnl || 0, slippage: slip, exitType, reason,
+    timestamp: new Date().toISOString(), mode: STATE.mode, market: pos.market || 'KR',
+    usdKrw: isUs ? STATE.usdKrw : 1,
   });
   await loadTradeHistory();
 
-  // ── 거래 결과 누적 → 적응 모드 갱신 ──────────────────────
   STATE.recentResults.push({ win: isWin, pnlPct: netPnlPct });
   if (STATE.recentResults.length > 30) STATE.recentResults.shift(); // 최대 30회 보관
   calcAdaptiveMode(); // 10회 단위 평가
@@ -1096,20 +1254,47 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
 
 // 신규 진입 스캔
 async function scanForEntries() {
-  const candidates = await generateCandidates();
-  STATE.candidates = candidates;
-  addLog('scan', `   후보 ${candidates.length}개 발견`);
+  const mkt = STATE.market;
+  let candidates = [];
 
+  if (mkt === 'KR') {
+    // 국내만
+    if (isKrMarketOpen() || STATE.mode === 'paper') {
+      candidates = await generateKrCandidates();
+    }
+  } else if (mkt === 'US') {
+    // 미국만
+    if (isUsMarketOpen() || STATE.mode === 'paper') {
+      candidates = await generateUsCandidates();
+    }
+  } else { // BOTH
+    // 열린 시장 쪽만 스캔 (동시 개장 시 둘 다)
+    const krSlots = Math.ceil(STATE.config.maxPositions * (1 - STATE.config.usRatio));
+    const usSlots = Math.floor(STATE.config.maxPositions * STATE.config.usRatio);
+    const krPosCount = STATE.positions.filter(p => p.market !== 'US').length;
+    const usPosCount = STATE.positions.filter(p => p.market === 'US').length;
+
+    if ((isKrMarketOpen() || STATE.mode === 'paper') && krPosCount < krSlots) {
+      const krCands = await generateKrCandidates();
+      candidates.push(...krCands.slice(0, krSlots - krPosCount));
+    }
+    if ((isUsMarketOpen() || STATE.mode === 'paper') && usPosCount < usSlots) {
+      const usCands = await generateUsCandidates();
+      candidates.push(...usCands.slice(0, usSlots - usPosCount));
+    }
+  }
+
+  STATE.candidates = candidates;
+  addLog('scan', `   후보 ${candidates.length}개 발견 (${mkt})`);
   for (const c of candidates) {
     if (STATE.positions.length >= STATE.config.maxPositions) break;
     if (STATE.positions.find(p => p.ticker === c.ticker)) continue;
-
     await executeEntry(c);
   }
 }
 
-// 후보 종목 생성 (전략별 모의 스캔)
-async function generateCandidates() {
+// ─── 국내주식 후보 종목 스캔 ─────────────────────────────────
+async function generateKrCandidates() {
   const strategy = document.getElementById('strategy-select').value || STATE.strategy;
 
   // 네이버 프록시로 거래량 순위 실시간 조회 (API 키 불필요)
@@ -1204,88 +1389,255 @@ function generateSimCandidates(strategy) {
   return results;
 }
 
-// 매수 실행
+// ─── 미국주식 후보 종목 스캔 ─────────────────────────────────
+async function generateUsCandidates() {
+  const strategy = document.getElementById('strategy-select').value || STATE.strategy;
+  const ap = (ADAPTIVE_PARAMS[strategy] || ADAPTIVE_PARAMS.scalping)[STATE.adaptiveMode];
+
+  // 나스닥100 + S&P500 주요 종목 고정 리스트
+  const US_STOCKS = [
+    // 나스닥 대형주
+    { ticker: 'AAPL',  name: 'Apple',         basePrice: 228,  excd: 'NAS' },
+    { ticker: 'MSFT',  name: 'Microsoft',     basePrice: 430,  excd: 'NAS' },
+    { ticker: 'NVDA',  name: 'NVIDIA',        basePrice: 130,  excd: 'NAS' },
+    { ticker: 'AMZN',  name: 'Amazon',        basePrice: 195,  excd: 'NAS' },
+    { ticker: 'GOOGL', name: 'Alphabet',      basePrice: 175,  excd: 'NAS' },
+    { ticker: 'META',  name: 'Meta',          basePrice: 560,  excd: 'NAS' },
+    { ticker: 'TSLA',  name: 'Tesla',         basePrice: 250,  excd: 'NAS' },
+    { ticker: 'AVGO',  name: 'Broadcom',      basePrice: 185,  excd: 'NAS' },
+    { ticker: 'AMD',   name: 'AMD',           basePrice: 145,  excd: 'NAS' },
+    { ticker: 'INTC',  name: 'Intel',         basePrice: 22,   excd: 'NAS' },
+    // NYSE 대형주
+    { ticker: 'JPM',   name: 'JPMorgan',      basePrice: 245,  excd: 'NYS' },
+    { ticker: 'V',     name: 'Visa',          basePrice: 280,  excd: 'NYS' },
+    { ticker: 'XOM',   name: 'ExxonMobil',    basePrice: 115,  excd: 'NYS' },
+    { ticker: 'BRK.B', name: 'Berkshire B',   basePrice: 460,  excd: 'NYS' },
+    { ticker: 'UNH',   name: 'UnitedHealth',  basePrice: 530,  excd: 'NYS' },
+    { ticker: 'JNJ',   name: 'J&J',           basePrice: 160,  excd: 'NYS' },
+    { ticker: 'WMT',   name: 'Walmart',       basePrice: 88,   excd: 'NYS' },
+    { ticker: 'MA',    name: 'Mastercard',    basePrice: 530,  excd: 'NYS' },
+    { ticker: 'PG',    name: 'P&G',           basePrice: 165,  excd: 'NYS' },
+    { ticker: 'LLY',   name: 'Eli Lilly',     basePrice: 790,  excd: 'NYS' },
+  ];
+
+  // 실전 모드: KIS API로 현재가 조회 후 필터링
+  if (STATE.mode === 'live' && KEYS.appKey) {
+    try {
+      const shuffled = [...US_STOCKS].sort(() => Math.random() - 0.5).slice(0, 10);
+      const results = await Promise.all(shuffled.map(async (s) => {
+        try {
+          const res = await fetch('/api/kis/us/price', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              appKey: KEYS.appKey, appSecret: KEYS.appSecret,
+              symbol: s.ticker, excd: s.excd,
+            }),
+          });
+          const data = await res.json();
+          if (data.ok && data.price > 0) {
+            return { ...s, price: data.price, pctChange: data.changeRate, volume: data.volume };
+          }
+        } catch {}
+        return null;
+      }));
+      const valid = results.filter(Boolean);
+      if (valid.length > 0) {
+        const filtered = valid.filter(item => {
+          const pct = item.pctChange || 0;
+          if (strategy === 'scalping')       return pct > ap.pctMin && pct < ap.pctMax;
+          if (strategy === 'volume')         return pct > 0;
+          if (strategy === 'momentum')       return pct > ap.pctMin;
+          if (strategy === 'mean_reversion') return pct < ap.pctMin;
+          return true;
+        });
+        const candidates = filtered.slice(0, 3).map(item => ({
+          ticker:    item.ticker,
+          name:      item.name,
+          price:     item.price,
+          pctChange: item.pctChange,
+          score:     Math.random() * 30 + 60 + (ap.scoreBonus || 0),
+          market:    'US',
+          excd:      item.excd,
+        }));
+        if (candidates.length > 0) {
+          addLog('scan', `   🇺🇸 미국주식 후보 ${candidates.length}개 (실시간)`);
+          return candidates;
+        }
+      }
+    } catch(e) {
+      addLog('warn', '⚠️ 미국주식 시세 조회 실패 — 시뮬레이션 사용: ' + e.message);
+    }
+  }
+
+  // 페이퍼 모드 또는 API 실패: 시뮬레이션
+  return generateUsSimCandidates(strategy, ap);
+}
+
+function generateUsSimCandidates(strategy, ap) {
+  const US_STOCKS = [
+    { ticker: 'AAPL',  name: 'Apple',         basePrice: 228 },
+    { ticker: 'MSFT',  name: 'Microsoft',     basePrice: 430 },
+    { ticker: 'NVDA',  name: 'NVIDIA',        basePrice: 130 },
+    { ticker: 'AMZN',  name: 'Amazon',        basePrice: 195 },
+    { ticker: 'GOOGL', name: 'Alphabet',      basePrice: 175 },
+    { ticker: 'META',  name: 'Meta',          basePrice: 560 },
+    { ticker: 'TSLA',  name: 'Tesla',         basePrice: 250 },
+    { ticker: 'AMD',   name: 'AMD',           basePrice: 145 },
+    { ticker: 'JPM',   name: 'JPMorgan',      basePrice: 245 },
+    { ticker: 'INTC',  name: 'Intel',         basePrice: 22  },
+  ];
+  const adap = ap || (ADAPTIVE_PARAMS[strategy] || ADAPTIVE_PARAMS.scalping)[STATE.adaptiveMode];
+  const results = [];
+  const shuffled = [...US_STOCKS].sort(() => Math.random() - 0.5);
+
+  for (const s of shuffled.slice(0, 7)) {
+    // 달러 소수점 변동 시뮬레이션
+    const pctChange   = (Math.random() - 0.3) * 4;
+    const volMult     = 1 + Math.random() * 3;
+    const rsi         = 30 + Math.random() * 50;
+    const buyPressure = 0.8 + Math.random() * 0.8;
+    const price       = Math.round(s.basePrice * (1 + pctChange / 100) * 100) / 100;
+
+    let pass = false;
+    if (strategy === 'scalping') {
+      pass = pctChange > adap.pctMin && pctChange < adap.pctMax
+          && rsi > (adap.rsiMin || 35) && rsi < (adap.rsiMax || 65)
+          && volMult >= (adap.volMult || 1.5)
+          && buyPressure >= (adap.buyPressure || 1.2);
+    } else if (strategy === 'volume') {
+      pass = volMult >= adap.volMult && pctChange > 0 && rsi < (adap.rsiMax || 70);
+    } else if (strategy === 'momentum') {
+      pass = pctChange > adap.pctMin && volMult >= adap.volMult;
+    } else if (strategy === 'mean_reversion') {
+      pass = pctChange < adap.pctMin && rsi < (adap.rsiMax || 30);
+    }
+
+    if (pass) {
+      results.push({
+        ticker:    s.ticker,
+        name:      s.name,
+        price,
+        pctChange: parseFloat(pctChange.toFixed(2)),
+        volume:    Math.round(1000000 * volMult),
+        rsi:       parseFloat(rsi.toFixed(1)),
+        score:     Math.min(100, Math.max(0, Math.round(50 + Math.random() * 40) + (adap.scoreBonus || 0))),
+        market:    'US',
+      });
+    }
+  }
+  return results;
+}
+
+// 매수 실행 (국내/미국 통합)
 async function executeEntry(candidate) {
+  const isUs = candidate.market === 'US';
+
+  // ── 가용 자금 조회 ─────────────────────────────────────
   let available;
   if (STATE.mode === 'paper') {
-    available = STATE.paperBalance;
+    available = isUs ? (STATE.paperBalanceUsd * STATE.usdKrw) : STATE.paperBalance;
   } else {
-    available = await getLiveBalance();
-    // 실전: 조회 결과 STATE 캐시에도 반영
-    if (available > 0) {
-      STATE.liveBalance   = available;
-      STATE.liveBalanceTs = Date.now();
+    if (isUs) {
+      available = (await getUsLiveBalance()) * STATE.usdKrw; // 달러→원화 환산 비교용
+      if (available > 0) { STATE.liveBalanceUsd = available / STATE.usdKrw; STATE.liveBalanceUsdTs = Date.now(); }
+    } else {
+      available = await getLiveBalance();
+      if (available > 0) { STATE.liveBalance = available; STATE.liveBalanceTs = Date.now(); }
     }
   }
   if (available < 10000) {
-    addLog('warn', `⚠️ 가용 자금 부족: ${fmtPrice(available)}원`);
+    addLog('warn', `⚠️ 가용 자금 부족: ${isUs ? '$'+(available/STATE.usdKrw).toFixed(0) : fmtPrice(available)+'원'}`);
     return;
   }
 
-  // ── 포지션 금액 범위 로직 ──────────────────────────────
-  // 실제 최대 = 사용자 설정 최댓값 × 상한율
-  const posMin    = STATE.config.posMinAmt  || 50000;
-  const posMaxBase= STATE.config.posMaxAmt  || 150000;
-  const posCapMult= STATE.config.posCapMult || 1.0;
-  const posMaxFinal = Math.round(posMaxBase * posCapMult / 10000) * 10000;
-
-  // 가용 현금이 최솟값보다 적으면 진입 불가
+  // ── 포지션 금액 계산 ───────────────────────────────────
+  const posMin     = STATE.config.posMinAmt  || 50000;
+  const posMaxBase = STATE.config.posMaxAmt  || 150000;
+  const posCapMult = STATE.config.posCapMult || 1.0;
+  const posMaxFinal= Math.round(posMaxBase * posCapMult / 10000) * 10000;
   if (available < posMin) {
-    addLog('warn', `⚠️ 가용 현금(${fmtPrice(available)}원)이 포지션 최솟값(${fmtManwon(posMin)})보다 적음`);
+    addLog('warn', `⚠️ 가용 현금 부족 (${fmtManwon(available)} < 최소 ${fmtManwon(posMin)})`);
     return;
   }
-
-  // 투자금 = min ~ max 범위 내 랜덤 (가용 현금 초과 불가)
-  // 조건에 따른 score 비례: score 높을수록 max에 가깝게
-  const score     = (candidate.score || 70) / 100;           // 0~1
+  const score     = (candidate.score || 70) / 100;
   const rawAmt    = posMin + Math.round((posMaxFinal - posMin) * score);
   const investAmt = Math.min(rawAmt, available, posMaxFinal);
-
   if (investAmt < 10000) return;
 
+  // 수량 계산
   const price = candidate.price || 1;
-  const qty   = Math.floor(investAmt / price);
-  if (qty < 1) return;
+  const qty   = isUs
+    ? Math.floor((investAmt / STATE.usdKrw) / price * 100) / 100 // 달러 수량 (소수점 가능)
+    : Math.floor(investAmt / price);
+  const qtyInt = Math.floor(qty); // 미국도 정수 수량 (KIS API 제약)
+  if (qtyInt < 1) { addLog('warn', `⚠️ 수량 부족: ${candidate.ticker} $${price} — 최소 1주 필요`); return; }
 
+  // ── 실전 주문 실행 ─────────────────────────────────────
   if (STATE.mode === 'live') {
     try {
-      const res = await fetch('/api/kis/order', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo,
-          ticker: candidate.ticker, side: 'buy', qty,
-        }),
-      });
-      const data = await res.json();
-      if (data.serverBlocked) {
-        addLog('warn', `⚠️ 매수 서버 차단 — 실전 주문 불가. Cloudflare Pages 배포 후 이용하세요: ${candidate.ticker}`);
-        return;
+      if (isUs) {
+        const excd = getUsExchangeCode(candidate.ticker).replace('NAS','NASD').replace('NYS','NYSE');
+        const res = await fetch('/api/kis/us/order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo,
+            symbol: candidate.ticker, excd,
+            side: 'buy', qty: qtyInt,
+            price: price.toFixed(2), // 지정가 (달러, 소수점 2자리)
+          }),
+        });
+        const data = await res.json();
+        if (data.serverBlocked) { addLog('warn', `⚠️ 미국 매수 서버 차단: ${candidate.ticker}`); return; }
+        if (!data.ok) throw new Error(data.error || JSON.stringify(data));
+      } else {
+        const res = await fetch('/api/kis/order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo,
+            ticker: candidate.ticker, side: 'buy', qty: qtyInt,
+          }),
+        });
+        const data = await res.json();
+        if (data.serverBlocked) { addLog('warn', `⚠️ 매수 서버 차단: ${candidate.ticker}`); return; }
+        if (!data.ok) throw new Error(data.error || JSON.stringify(data));
       }
-      if (!data.ok) throw new Error(data.error || JSON.stringify(data));
     } catch(e) {
       addLog('error', `❌ 매수 실패: ${candidate.ticker} — ${e.message}`);
       return;
     }
   } else {
-    STATE.paperBalance -= qty * price;
+    // 페이퍼 모드: 잔고 차감
+    if (isUs) {
+      STATE.paperBalanceUsd -= qtyInt * price;
+    } else {
+      STATE.paperBalance -= qtyInt * price;
+    }
   }
 
   const pos = {
     ticker:       candidate.ticker,
     name:         candidate.name || candidate.ticker,
-    entryPrice:   candidate.price,
-    qty,
+    entryPrice:   price,
+    qty:          qtyInt,
     entryTime:    Date.now(),
-    currentPrice: candidate.price,
+    currentPrice: price,
     pnlPct:       0,
-    peakPnl:      0,      // 트레일링 스탑용 고점 수익률 추적
-    trailArmed:   false,  // 익절 목표 최초 돌파 여부
+    peakPnl:      0,
+    trailArmed:   false,
     score:        candidate.score,
+    market:       candidate.market || 'KR', // 'KR' | 'US'
   };
   STATE.positions.push(pos);
 
-  addLog('buy', `💰 매수: ${pos.name} (${pos.ticker})`);
+  const mktFlag = isUs ? '🇺🇸' : '🇰🇷';
+  const priceStr = isUs ? `$${price.toFixed(2)}` : fmtPrice(price) + '원';
+  const amtStr   = isUs
+    ? `$${(qtyInt * price).toFixed(2)} (≈${fmtManwon(Math.round(qtyInt * price * STATE.usdKrw))})`
+    : fmtManwon(qtyInt * price);
+  addLog('buy', `💰 ${mktFlag} 매수: ${pos.name} (${pos.ticker})`);
   addLog('buy', `   진입가 ${fmtPrice(pos.entryPrice)}원 | ${qty}주 | 투자 ${fmtPrice(qty * price)}원 (범위: ${fmtManwon(posMin)}~${fmtManwon(posMaxFinal)})`);
   renderPositions();
   updateStatsUI(); // 매수 즉시 총자산 카드 반영
@@ -1293,65 +1645,111 @@ async function executeEntry(candidate) {
 
 // ─── 실시간 포지션 가격 업데이트 ──────────────────────────────
 async function tickPositions() {
-  // ── 실전 모드: 30초마다 잔고 자동 폴링 ──────────────────
+  // ── 국내 실전 잔고 30초마다 폴링 ─────────────────────────
   if (STATE.mode === 'live' && KEYS.appKey && KEYS.accountNo) {
-    const elapsed = Date.now() - STATE.liveBalanceTs;
-    if (!STATE.liveBalanceFetching && elapsed > 30000) {
-      STATE.liveBalanceFetching = true;
-      // 첫 조회이거나 갱신 시 "조회 중" 표시
-      if (STATE.liveBalanceTs === 0) {
-        const cashEl = document.getElementById('stat-cash');
-        if (cashEl) cashEl.textContent = '조회 중…';
-      }
-      getLiveBalance().then(bal => {
-        const prev = STATE.liveBalance;
-        STATE.liveBalance    = bal;
-        STATE.liveBalanceTs  = Date.now();
-        STATE.liveBalanceFetching = false;
-        if (bal > 0 && bal !== prev) {
-          addLog('info', `💰 실전 잔고 갱신: ${fmtPrice(bal)}원`);
-          updateStatsUI();
-        } else if (bal === 0 && prev > 0) {
-          updateStatsUI();
+    if ((STATE.market === 'KR' || STATE.market === 'BOTH')) {
+      const elapsed = Date.now() - STATE.liveBalanceTs;
+      if (!STATE.liveBalanceFetching && elapsed > 30000) {
+        STATE.liveBalanceFetching = true;
+        if (STATE.liveBalanceTs === 0) {
+          const cashEl = document.getElementById('stat-cash');
+          if (cashEl) cashEl.textContent = '조회 중…';
         }
-      }).catch(() => {
-        STATE.liveBalanceFetching = false;
-      });
+        getLiveBalance().then(bal => {
+          const prev = STATE.liveBalance;
+          STATE.liveBalance   = bal;
+          STATE.liveBalanceTs = Date.now();
+          STATE.liveBalanceFetching = false;
+          if (bal > 0 && bal !== prev) { addLog('info', `💰 국내 잔고 갱신: ${fmtPrice(bal)}원`); updateStatsUI(); }
+          else if (bal === 0 && prev > 0) updateStatsUI();
+        }).catch(() => { STATE.liveBalanceFetching = false; });
+      }
+    }
+    // ── 미국 달러 잔고 30초마다 폴링 ───────────────────────
+    if ((STATE.market === 'US' || STATE.market === 'BOTH')) {
+      const elapsedUsd = Date.now() - STATE.liveBalanceUsdTs;
+      if (!STATE.liveBalanceUsdFetching && elapsedUsd > 30000) {
+        STATE.liveBalanceUsdFetching = true;
+        getUsLiveBalance().then(usd => {
+          const prev = STATE.liveBalanceUsd;
+          STATE.liveBalanceUsd    = usd;
+          STATE.liveBalanceUsdTs  = Date.now();
+          STATE.liveBalanceUsdFetching = false;
+          if (usd > 0 && Math.abs(usd - prev) > 0.01) {
+            addLog('info', `💵 미국 달러 잔고 갱신: $${usd.toFixed(2)} (≈${fmtPrice(Math.round(usd * STATE.usdKrw))}원)`);
+            updateStatsUI();
+          }
+        }).catch(() => { STATE.liveBalanceUsdFetching = false; });
+      }
     }
   }
 
   if (STATE.positions.length === 0) return;
 
   for (const pos of STATE.positions) {
-    const price = await fetchCurrentPrice(pos.ticker);
+    const price = await fetchCurrentPrice(pos.ticker, pos.market);
     if (price) {
       pos.currentPrice = price;
       pos.pnlPct = ((price - pos.entryPrice) / pos.entryPrice) * 100;
-      // 고점 갱신 (트레일링 스탑용)
       if (pos.pnlPct > (pos.peakPnl || 0)) pos.peakPnl = pos.pnlPct;
     }
   }
   renderPositions();
-  updateStatsUI(); // 포지션 가격 변동 → 총자산 카드 즉시 반영
+  updateStatsUI();
 }
 
-async function fetchCurrentPrice(ticker) {
+async function fetchCurrentPrice(ticker, market) {
+  const mkt = market || (STATE.positions.find(p => p.ticker === ticker)?.market) || 'KR';
+  if (mkt === 'US') {
+    return await fetchUsCurrentPrice(ticker);
+  }
+  // 국내주식
   if (STATE.mode === 'live' && KEYS.appKey) {
     try {
-      // 네이버 프록시로 현재가 조회
       const res = await axios.get(`/api/naver/price/${ticker}`, { timeout: 4000 });
       return res.data?.price || null;
     } catch { return null; }
   }
-  // 페이퍼: 시뮬레이션 가격 (소폭 랜덤 변동)
+  // 페이퍼: 시뮬레이션
   const pos = STATE.positions.find(p => p.ticker === ticker);
   if (!pos) return null;
   const drift = (Math.random() - 0.48) * pos.entryPrice * 0.003;
   return Math.round(pos.currentPrice + drift);
 }
 
+/** 미국주식 현재가 조회 (달러) */
+async function fetchUsCurrentPrice(symbol) {
+  if (STATE.mode === 'live' && KEYS.appKey) {
+    try {
+      const excd = getUsExchangeCode(symbol);
+      const res = await fetch('/api/kis/us/price', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appKey: KEYS.appKey, appSecret: KEYS.appSecret, symbol, excd }),
+      });
+      const data = await res.json();
+      if (data.ok && data.price > 0) return data.price;
+    } catch {}
+  }
+  // 페이퍼: 시뮬레이션 (달러 기반 소폭 변동)
+  const pos = STATE.positions.find(p => p.ticker === symbol);
+  if (!pos) return null;
+  const drift = (Math.random() - 0.48) * pos.entryPrice * 0.002;
+  return Math.round((pos.currentPrice + drift) * 100) / 100; // 소수점 2자리
+}
+
+/** 미국주식 거래소 코드 추론 (NASD=나스닥, NYSE=뉴욕) */
+function getUsExchangeCode(symbol) {
+  // 나스닥 대표 종목
+  const nasd = ['AAPL','MSFT','AMZN','GOOGL','GOOG','META','NVDA','TSLA','AVGO','COST',
+    'NFLX','AMD','INTC','QCOM','AMAT','MU','LRCX','KLAC','MRVL','ADI',
+    'PYPL','SBUX','GILD','REGN','VRTX','IDXX','BIIB','ILMN','ALGN','SGEN',
+    'PANW','FTNT','CDNS','SNPS','ANSS','CTSH','FISV','PAYX','FAST','CTAS'];
+  return nasd.includes(symbol.toUpperCase()) ? 'NAS' : 'NYS';
+}
+
 async function getLiveBalance() {
-  if (!KEYS.appKey || !KEYS.accountNo) return STATE.liveBalance; // 키 없으면 캐시 반환
+  if (!KEYS.appKey || !KEYS.accountNo) return STATE.liveBalance;
   try {
     const res = await fetch('/api/kis/balance', {
       method: 'POST',
@@ -1360,13 +1758,52 @@ async function getLiveBalance() {
     });
     const data = await res.json();
     if (data.serverBlocked) {
-      addLog('warn', '⚠️ 서버→KIS 연결 차단 — 실전 잔고 조회 불가 (Cloudflare Pages 배포 후 사용 가능)');
-      return STATE.liveBalance; // 캐시 값 유지
+      addLog('warn', '⚠️ 서버→KIS 연결 차단 — 실전 잔고 조회 불가');
+      return STATE.liveBalance;
     }
     return data.balance || 0;
   } catch {
-    return STATE.liveBalance; // 네트워크 오류 시 캐시 유지
+    return STATE.liveBalance;
   }
+}
+
+/** 미국주식 달러 잔고 조회 */
+async function getUsLiveBalance() {
+  if (!KEYS.appKey || !KEYS.accountNo) return STATE.liveBalanceUsd;
+  try {
+    const res = await fetch('/api/kis/us/balance', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo }),
+    });
+    const data = await res.json();
+    if (data.serverBlocked) {
+      addLog('warn', '⚠️ 서버→KIS 연결 차단 — 미국주식 잔고 조회 불가');
+      return STATE.liveBalanceUsd;
+    }
+    return data.cashUsd || 0;
+  } catch {
+    return STATE.liveBalanceUsd;
+  }
+}
+
+/** 원/달러 환율 조회 + 캐시 */
+async function fetchUsdKrw() {
+  // 5분 캐시
+  if (STATE.usdKrwTs && Date.now() - STATE.usdKrwTs < 5 * 60 * 1000) return STATE.usdKrw;
+  try {
+    const res = await fetch('/api/forex/usd-krw', { signal: AbortSignal.timeout(5000) });
+    const data = await res.json();
+    if (data.ok && data.rate > 0) {
+      STATE.usdKrw   = data.rate;
+      STATE.usdKrwTs = Date.now();
+      // 환율 표시 업데이트
+      const fxEl = document.getElementById('fx-rate-display');
+      if (fxEl) fxEl.textContent = `$1 = ${fmtPrice(data.rate)}원`;
+      addLog('info', `💱 환율 갱신: $1 = ${fmtPrice(data.rate)}원 (출처: ${data.source})`);
+    }
+  } catch {}
+  return STATE.usdKrw;
 }
 
 // ─── 포지션 UI 렌더링 ─────────────────────────────────────────
@@ -1503,7 +1940,28 @@ function updateStatsUI() {
   }, 0);
 
   if (STATE.mode === 'paper') {
-    const totalAsset = STATE.paperBalance + stockVal;
+    const mkt = STATE.market;
+    // 국내 포지션 평가금
+    const stockValKr  = STATE.positions.filter(p => p.market !== 'US').reduce((s,p) => s + p.currentPrice * p.qty, 0);
+    // 미국 포지션 평가금 (달러 → 원화)
+    const stockValUsd = STATE.positions.filter(p => p.market === 'US').reduce((s,p) => s + p.currentPrice * p.qty, 0);
+    const stockValUsdKrw = Math.round(stockValUsd * STATE.usdKrw);
+
+    let totalAsset, cashDisplay, stockDisplay;
+    if (mkt === 'US') {
+      totalAsset   = Math.round((STATE.paperBalanceUsd + stockValUsd) * STATE.usdKrw);
+      cashDisplay  = `$${STATE.paperBalanceUsd.toFixed(2)} (≈${fmtPrice(Math.round(STATE.paperBalanceUsd * STATE.usdKrw))}원)`;
+      stockDisplay = stockValUsd > 0 ? `$${stockValUsd.toFixed(2)} (≈${fmtPrice(stockValUsdKrw)}원)` : '없음';
+    } else if (mkt === 'BOTH') {
+      totalAsset   = STATE.paperBalance + stockValKr + Math.round(STATE.paperBalanceUsd * STATE.usdKrw) + stockValUsdKrw;
+      cashDisplay  = `${fmtPrice(STATE.paperBalance)}원 / $${STATE.paperBalanceUsd.toFixed(2)}`;
+      stockDisplay = (stockValKr + stockValUsdKrw) > 0 ? fmtPrice(stockValKr + stockValUsdKrw) + '원' : '없음';
+    } else {
+      totalAsset   = STATE.paperBalance + stockValKr;
+      cashDisplay  = fmtPrice(STATE.paperBalance) + '원';
+      stockDisplay = stockValKr > 0 ? fmtPrice(stockValKr) + '원' : '없음';
+    }
+
     const initialCap = STATE.config.paperCapital;
     // 총자산 표시
     document.getElementById('stat-total-asset').textContent = fmtPrice(totalAsset) + '원';
@@ -1511,9 +1969,9 @@ function updateStatsUI() {
     const assetEl = document.getElementById('stat-total-asset');
     const assetDiff = totalAsset - initialCap;
     assetEl.className = 'text-2xl font-bold ' + (assetDiff >= 0 ? 'text-white' : 'text-red-300') + ' tracking-tight';
-    // 현금 / 주식평가
-    document.getElementById('stat-cash').textContent        = fmtPrice(STATE.paperBalance) + '원';
-    document.getElementById('stat-stock-value').textContent = stockVal > 0 ? fmtPrice(stockVal) + '원' : '없음';
+    // 현금 / 주식평가 (시장 모드별 표시)
+    document.getElementById('stat-cash').textContent        = cashDisplay;
+    document.getElementById('stat-stock-value').textContent = stockDisplay;
     // 배지
     document.getElementById('stat-asset-badge').textContent = '페이퍼';
     // 진행 바: 현재자산 / 초기자산 비율
@@ -1523,15 +1981,29 @@ function updateStatsUI() {
     barEl.className = 'h-0.5 rounded transition-all duration-500 ' + (assetDiff >= 0 ? 'bg-green-500' : 'bg-red-500');
   } else {
     // ── 실전 모드 — 캐시된 잔고 + 보유주식 평가금 합산 표시 ──
-    const cash      = STATE.liveBalance;       // 캐시된 현금 잔고
-    const totalAsset = cash + stockVal;         // 총자산 = 현금 + 주식 평가금
+    const mkt       = STATE.market;
+    const cash      = STATE.liveBalance;       // 캐시된 현금 잔고 (원화)
+    const cashUsd   = STATE.liveBalanceUsd;    // 달러 현금 잔고
     const fetching  = STATE.liveBalanceFetching;
-    const hasCash   = cash > 0;
-    const hasStock  = stockVal > 0;
+    const fetchingUsd = STATE.liveBalanceUsdFetching;
+
+    // 달러 포지션 평가금 (원화 환산)
+    const stockValKr  = STATE.positions.filter(p => p.market !== 'US').reduce((s,p) => s + p.currentPrice * p.qty, 0);
+    const stockValUsd = STATE.positions.filter(p => p.market === 'US').reduce((s,p) => s + p.currentPrice * p.qty, 0);
+    const stockValUsdKrw = Math.round(stockValUsd * STATE.usdKrw);
+
+    // 총자산 계산
+    let totalAsset = 0;
+    if (mkt === 'KR')   totalAsset = cash + stockValKr;
+    else if (mkt === 'US')  totalAsset = Math.round(cashUsd * STATE.usdKrw) + stockValUsdKrw;
+    else                totalAsset = cash + stockValKr + Math.round(cashUsd * STATE.usdKrw) + stockValUsdKrw;
+
+    const hasCash   = cash > 0 || cashUsd > 0;
+    const hasStock  = stockValKr > 0 || stockValUsd > 0;
 
     // 총 자산 표시
     const assetEl = document.getElementById('stat-total-asset');
-    if (fetching && !hasCash) {
+    if ((fetching || fetchingUsd) && !hasCash) {
       assetEl.textContent = '조회 중…';
       assetEl.className = 'text-2xl font-bold text-yellow-400 tracking-tight';
     } else if (hasCash || hasStock) {
@@ -1544,16 +2016,40 @@ function updateStatsUI() {
 
     // 현금 잔고 표시
     const cashEl = document.getElementById('stat-cash');
-    if (fetching && !hasCash) {
-      cashEl.textContent = '조회 중…';
-    } else if (hasCash) {
-      cashEl.textContent = fmtPrice(cash) + '원';
+    if (mkt === 'US') {
+      // 미국 모드: 달러 잔고 표시
+      if (fetchingUsd && cashUsd === 0) {
+        cashEl.textContent = '조회 중…';
+      } else if (cashUsd > 0) {
+        cashEl.textContent = `$${cashUsd.toFixed(2)} (≈${fmtPrice(Math.round(cashUsd * STATE.usdKrw))}원)`;
+      } else {
+        cashEl.textContent = '미연결';
+      }
+    } else if (mkt === 'BOTH') {
+      // BOTH 모드: 원화 + 달러 합산
+      const krPart = cash > 0 ? fmtPrice(cash) + '원' : '';
+      const usPart = cashUsd > 0 ? `$${cashUsd.toFixed(0)}` : '';
+      if (fetching && cash === 0 && fetchingUsd && cashUsd === 0) {
+        cashEl.textContent = '조회 중…';
+      } else if (krPart || usPart) {
+        cashEl.textContent = [krPart, usPart].filter(Boolean).join(' / ');
+      } else {
+        cashEl.textContent = '미연결';
+      }
     } else {
-      cashEl.textContent = '미연결';
+      // KR 모드
+      if (fetching && !cash) {
+        cashEl.textContent = '조회 중…';
+      } else if (cash) {
+        cashEl.textContent = fmtPrice(cash) + '원';
+      } else {
+        cashEl.textContent = '미연결';
+      }
     }
 
     // 주식 평가금 표시
-    document.getElementById('stat-stock-value').textContent = hasStock ? fmtPrice(stockVal) + '원' : '-';
+    const stockDisplayVal = mkt === 'US' ? stockValUsdKrw : mkt === 'BOTH' ? (stockValKr + stockValUsdKrw) : stockValKr;
+    document.getElementById('stat-stock-value').textContent = stockDisplayVal > 0 ? fmtPrice(stockDisplayVal) + '원' : '-';
 
     // 배지 + 진행 바 (실전)
     document.getElementById('stat-asset-badge').textContent = '실전';
@@ -1562,7 +2058,7 @@ function updateStatsUI() {
     // 진행 바 (잔고 대비 주식 비중)
     const barEl = document.getElementById('stat-asset-bar');
     if (totalAsset > 0) {
-      const barPct = Math.min((stockVal / totalAsset) * 100, 100);
+      const barPct = Math.min((stockDisplayVal / totalAsset) * 100, 100);
       barEl.style.width = barPct + '%';
       barEl.className = 'h-0.5 rounded transition-all duration-500 bg-red-400';
     } else {
@@ -1728,57 +2224,165 @@ async function loadVolumeRank() {
  * 현재 정규 거래 가능 여부 반환 (09:00~15:30, 평일만)
  * runScan() / scanForEntries() 에서 진입 차단에 사용
  */
-function isMarketOpen() {
+// ─── 장 시간 판별 ─────────────────────────────────────────────
+// 모든 시간은 브라우저 로컬 시간 기준 (한국 사용자 = KST)
+
+/** 국내 정규장 여부 (평일 09:00~15:30 KST) */
+function isKrMarketOpen() {
   const now = new Date();
-  const h   = now.getHours(), m = now.getMinutes();
-  const day = now.getDay(); // 0=일, 6=토
+  const day = now.getDay();
   if (day === 0 || day === 6) return false;
-  // 09:00:00 이상, 15:30:00 이하
-  const minTotal = h * 60 + m;
-  return minTotal >= 9 * 60 && minTotal <= 15 * 60 + 30;
+  const min = now.getHours() * 60 + now.getMinutes();
+  return min >= 9 * 60 && min <= 15 * 60 + 30;
+}
+
+/** 국내 장 마감 30분 전 여부 (15:00~15:30 KST) */
+function isKrMarketClosingSoon() {
+  const now = new Date();
+  const day = now.getDay();
+  if (day === 0 || day === 6) return false;
+  const min = now.getHours() * 60 + now.getMinutes();
+  return min >= 15 * 60 && min <= 15 * 60 + 30;
+}
+
+/** 미국 야간 정규장 여부 (평일+토요일 23:30~06:00 KST)
+ *  - 미국 장 : EST 09:30~16:00 = KST 23:30~06:00
+ *  - 토요일 00:00~06:00 도 포함 (금요일 뉴욕장 연속)
+ */
+function isUsMarketOpen() {
+  const now = new Date();
+  const day = now.getDay(); // 0=일, 6=토
+  const h = now.getHours(), m = now.getMinutes();
+  const min = h * 60 + m;
+  // 일요일은 완전 마감
+  if (day === 0) return false;
+  // 평일(월~금): 23:30 이후 또는 00:00~06:00
+  if (day >= 1 && day <= 5) {
+    return min >= 23 * 60 + 30 || min <= 6 * 60;
+  }
+  // 토요일: 00:00~06:00 (금요일 뉴욕장 마지막)
+  if (day === 6) {
+    return min <= 6 * 60;
+  }
+  return false;
+}
+
+/** 미국 장 마감 30분 전 여부 (05:30~06:00 KST) */
+function isUsMarketClosingSoon() {
+  const now = new Date();
+  const day = now.getDay();
+  if (day === 0) return false;
+  const min = now.getHours() * 60 + now.getMinutes();
+  // 06:00 기준 30분 전 = 05:30~06:00
+  return min >= 5 * 60 + 30 && min <= 6 * 60;
+}
+
+/** 현재 시장 모드에서 신규 진입 가능한지 */
+function isMarketOpen() {
+  const mkt = STATE.market;
+  if (mkt === 'KR')   return isKrMarketOpen();
+  if (mkt === 'US')   return isUsMarketOpen();
+  if (mkt === 'BOTH') return isKrMarketOpen() || isUsMarketOpen();
+  return false;
+}
+
+/** 다음 개장 시각 문자열 */
+function getNextOpenStr() {
+  const now = new Date();
+  const mkt = STATE.market;
+  if (mkt === 'US') {
+    // 다음 미국 야간 정규장: 당일 23:30 또는 다음 평일 23:30
+    const day = now.getDay();
+    const min = now.getHours() * 60 + now.getMinutes();
+    let daysAdd = 0;
+    // 이미 당일 23:30 이전이면 오늘 23:30
+    if (min < 23 * 60 + 30 && day >= 1 && day <= 5) daysAdd = 0;
+    // 아니면 다음날
+    else daysAdd = 1;
+    // 일~금 → 다음 평일
+    const next = new Date(now);
+    next.setDate(next.getDate() + daysAdd);
+    // 주말 건너뜀
+    while (next.getDay() === 0 || next.getDay() === 6) next.setDate(next.getDate() + 1);
+    next.setHours(23, 30, 0, 0);
+    return `${String(next.getMonth()+1).padStart(2,'0')}/${String(next.getDate()).padStart(2,'0')} 23:30`;
+  }
+  // 국내 기본
+  const d = now.getDay();
+  const next = new Date(now);
+  next.setDate(next.getDate() + (d === 0 ? 1 : d === 6 ? 2 : 1));
+  next.setHours(9, 0, 0, 0);
+  return `${String(next.getMonth()+1).padStart(2,'0')}/${String(next.getDate()).padStart(2,'0')} 09:00`;
 }
 
 function updateMarketStatus() {
-  const now = new Date();
-  const h = now.getHours(), m = now.getMinutes();
-  const day = now.getDay(); // 0=일, 6=토
   const dot   = document.getElementById('market-dot');
   const label = document.getElementById('market-label');
+  if (!dot || !label) return;
 
-  const isWeekday = day >= 1 && day <= 5;
-  const inSession = isMarketOpen();
-  const preOpen   = isWeekday && h === 8 && m >= 30;
-  const afterHour = isWeekday && ((h === 15 && m > 30) || (h >= 16 && h < 18));
-
-  if (inSession) {
-    dot.className   = 'w-2 h-2 rounded-full bg-green-500 running-indicator';
-    label.textContent = '🟢 정규장 (09:00~15:30)';
-    label.className = 'text-green-400 text-sm';
-  } else if (preOpen) {
-    dot.className   = 'w-2 h-2 rounded-full bg-yellow-400';
-    label.textContent = '🟡 장 전 시간외 (08:30~09:00)';
-    label.className = 'text-yellow-400 text-sm';
-  } else if (afterHour) {
-    dot.className   = 'w-2 h-2 rounded-full bg-blue-400';
-    label.textContent = '🔵 장 후 시간외 (15:30~18:00)';
-    label.className = 'text-blue-400 text-sm';
-  } else {
-    dot.className   = 'w-2 h-2 rounded-full bg-gray-500';
-    label.textContent = `⚫ 장 마감 (다음 개장 ${getNextOpenStr()})`;
-    label.className = 'text-gray-400 text-sm';
-  }
-}
-
-function getNextOpenStr() {
+  const mkt = STATE.market;
+  const krOpen = isKrMarketOpen();
+  const usOpen = isUsMarketOpen();
   const now = new Date();
-  const d = now.getDay();
-  let daysUntil = d === 0 ? 1 : d === 6 ? 2 : 1;
-  const next = new Date(now);
-  next.setDate(next.getDate() + daysUntil);
-  next.setHours(9, 0, 0, 0);
-  const mm = String(next.getMonth() + 1).padStart(2, '0');
-  const dd = String(next.getDate()).padStart(2, '0');
-  return `${mm}/${dd} 09:00`;
+  const h = now.getHours(), m = now.getMinutes();
+  const day = now.getDay();
+  const isWeekday = day >= 1 && day <= 5;
+
+  if (mkt === 'KR') {
+    const preOpen  = isWeekday && h === 8 && m >= 30;
+    const afterHour= isWeekday && ((h === 15 && m > 30) || (h >= 16 && h < 18));
+    if (krOpen) {
+      dot.className = 'w-2 h-2 rounded-full bg-green-500 running-indicator';
+      label.textContent = '🇰🇷 정규장 (09:00~15:30)';
+      label.className = 'text-green-400 text-sm';
+    } else if (preOpen) {
+      dot.className = 'w-2 h-2 rounded-full bg-yellow-400';
+      label.textContent = '🟡 장 전 시간외 (08:30~09:00)';
+      label.className = 'text-yellow-400 text-sm';
+    } else if (afterHour) {
+      dot.className = 'w-2 h-2 rounded-full bg-blue-400';
+      label.textContent = '🔵 장 후 시간외 (15:30~18:00)';
+      label.className = 'text-blue-400 text-sm';
+    } else {
+      dot.className = 'w-2 h-2 rounded-full bg-gray-500';
+      label.textContent = `⚫ 장 마감 (다음 ${getNextOpenStr()})`;
+      label.className = 'text-gray-400 text-sm';
+    }
+  } else if (mkt === 'US') {
+    if (usOpen) {
+      dot.className = 'w-2 h-2 rounded-full bg-blue-400 running-indicator';
+      label.textContent = '🇺🇸 미국 야간장 (23:30~06:00)';
+      label.className = 'text-blue-400 text-sm';
+    } else {
+      dot.className = 'w-2 h-2 rounded-full bg-gray-500';
+      label.textContent = `🇺🇸 미국장 마감 (다음 ${getNextOpenStr()})`;
+      label.className = 'text-gray-400 text-sm';
+    }
+  } else { // BOTH
+    if (krOpen && usOpen) {
+      dot.className = 'w-2 h-2 rounded-full bg-green-400 running-indicator';
+      label.textContent = '🌏 국내+미국 동시 개장';
+      label.className = 'text-green-400 text-sm';
+    } else if (krOpen) {
+      dot.className = 'w-2 h-2 rounded-full bg-green-500 running-indicator';
+      label.textContent = '🇰🇷 국내 정규장 (미국 마감)';
+      label.className = 'text-green-400 text-sm';
+    } else if (usOpen) {
+      dot.className = 'w-2 h-2 rounded-full bg-blue-400 running-indicator';
+      label.textContent = '🇺🇸 미국 야간장 (국내 마감)';
+      label.className = 'text-blue-400 text-sm';
+    } else {
+      dot.className = 'w-2 h-2 rounded-full bg-gray-500';
+      label.textContent = `⚫ 모든 장 마감 (다음 ${getNextOpenStr()})`;
+      label.className = 'text-gray-400 text-sm';
+    }
+  }
+
+  // 환율 표시 업데이트
+  const fxEl = document.getElementById('fx-rate-display');
+  if (fxEl && STATE.market !== 'KR') {
+    fxEl.textContent = `$1 = ${fmtPrice(STATE.usdKrw)}원`;
+  }
 }
 
 // ─── 로그 ────────────────────────────────────────────────────

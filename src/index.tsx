@@ -250,6 +250,173 @@ app.post('/api/kis/order', async (c) => {
   }
 })
 
+// ── KIS 프록시: 미국주식 현재가 (서버→KIS HHDFS00000300)
+app.post('/api/kis/us/price', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as any
+  const { appKey, appSecret, symbol, excd } = body
+  // excd: NAS=나스닥, NYS=뉴욕, AMS=아멕스
+  if (!appKey || !appSecret || !symbol) {
+    return c.json({ error: 'appKey, appSecret, symbol 필수' }, 400)
+  }
+  const { token, error, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret)
+  if (!token) {
+    return c.json({ error: error || '토큰 실패', serverBlocked: !!networkError }, networkError ? 503 : 401)
+  }
+  try {
+    const exchCd = (excd || 'NAS').toUpperCase()
+    const url = `https://openapi.koreainvestment.com:9443/uapi/overseas-price/v1/quotations/price?AUTH=&EXCD=${exchCd}&SYMB=${symbol}`
+    const res = await fetch(url, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        appkey: appKey, appsecret: appSecret,
+        tr_id: 'HHDFS00000300', custtype: 'P',
+      },
+      // @ts-ignore
+      signal: AbortSignal.timeout(8000),
+    })
+    const data: any = await res.json()
+    if (data.rt_cd !== '0') return c.json({ error: data.msg1 || JSON.stringify(data) }, 400)
+    const out = data.output || {}
+    return c.json({
+      ok: true,
+      symbol,
+      name: out.rsym || symbol,
+      price: parseFloat(out.last || '0'),       // 현재가 (달러)
+      change: parseFloat(out.diff || '0'),       // 전일 대비
+      changeRate: parseFloat(out.rate || '0'),   // 등락률 %
+      volume: parseInt(out.tvol || '0'),         // 거래량
+      high: parseFloat(out.high || '0'),
+      low: parseFloat(out.low || '0'),
+    })
+  } catch (e: any) {
+    return c.json({ error: e?.message || '미국주식 현재가 조회 실패', serverBlocked: true }, 503)
+  }
+})
+
+// ── KIS 프록시: 미국주식 잔고 조회
+app.post('/api/kis/us/balance', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as any
+  const { appKey, appSecret, accountNo } = body
+  if (!appKey || !appSecret || !accountNo) {
+    return c.json({ error: 'appKey, appSecret, accountNo 필수' }, 400)
+  }
+  const { token, error, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret)
+  if (!token) {
+    return c.json({ error: error || '토큰 실패', serverBlocked: !!networkError }, networkError ? 503 : 401)
+  }
+  try {
+    const [cano, acntPrdtCd] = accountNo.split('-')
+    // 해외주식 잔고 조회 API
+    const url = `https://openapi.koreainvestment.com:9443/uapi/overseas-stock/v1/trading/inquire-balance?CANO=${cano}&ACNT_PRDT_CD=${acntPrdtCd}&OVRS_EXCG_CD=NASD&TR_CRCY_CD=USD&CTX_AREA_FK200=&CTX_AREA_NK200=`
+    const res = await fetch(url, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        appkey: appKey, appsecret: appSecret,
+        tr_id: 'TTTS3012R', custtype: 'P',
+      },
+      // @ts-ignore
+      signal: AbortSignal.timeout(8000),
+    })
+    const data: any = await res.json()
+    if (data.rt_cd !== '0') return c.json({ error: data.msg1 || JSON.stringify(data) }, 400)
+    // output2[0].frcr_pchs_amt1 = 외화 매입금액, tot_evlu_pfls_amt = 총평가손익
+    const out2 = data.output2?.[0] || {}
+    return c.json({
+      ok: true,
+      cashUsd: parseFloat(out2.frcr_dncl_amt_2 || out2.frcr_evlu_amt || '0'), // 달러 현금
+      totalUsd: parseFloat(out2.tot_evlu_amt || '0'),  // 달러 총평가
+    })
+  } catch (e: any) {
+    return c.json({ error: e?.message || '미국주식 잔고 조회 실패', serverBlocked: true }, 503)
+  }
+})
+
+// ── KIS 프록시: 미국주식 주문 (야간 정규장)
+app.post('/api/kis/us/order', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as any
+  const { appKey, appSecret, accountNo, symbol, excd, side, qty, price } = body
+  // side: 'buy'|'sell', excd: NASD|NYSE|AMEX, price: 지정가(달러)
+  if (!appKey || !appSecret || !accountNo || !symbol || !side || !qty || !price) {
+    return c.json({ error: 'appKey, appSecret, accountNo, symbol, side, qty, price 필수' }, 400)
+  }
+  const { token, error, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret)
+  if (!token) {
+    return c.json({ error: error || '토큰 실패', serverBlocked: !!networkError }, networkError ? 503 : 401)
+  }
+  try {
+    const [cano, acntPrdtCd] = accountNo.split('-')
+    const exchCd = (excd || 'NASD').toUpperCase()
+    // 야간 정규장 tr_id: 매수=TTTS0308U, 매도=TTTS0307U
+    const trId = side === 'buy' ? 'TTTS0308U' : 'TTTS0307U'
+    const res = await fetch('https://openapi.koreainvestment.com:9443/uapi/overseas-stock/v1/trading/order', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        authorization: `Bearer ${token}`,
+        appkey: appKey, appsecret: appSecret,
+        tr_id: trId, custtype: 'P',
+      },
+      body: JSON.stringify({
+        CANO: cano, ACNT_PRDT_CD: acntPrdtCd,
+        OVRS_EXCG_CD: exchCd,
+        PDNO: symbol,
+        ORD_DVSN: '00',          // 00=지정가 (미국은 지정가만)
+        ORD_QTY: String(qty),
+        OVRS_ORD_UNPR: String(price), // 주문 단가 (달러)
+        ORD_SVR_DVSN_CD: '0',
+      }),
+      // @ts-ignore
+      signal: AbortSignal.timeout(8000),
+    })
+    const data: any = await res.json()
+    if (data.rt_cd !== '0') return c.json({ error: data.msg1 || JSON.stringify(data) }, 400)
+    return c.json({ ok: true, ordNo: data.output?.odno })
+  } catch (e: any) {
+    return c.json({ error: e?.message || '미국주식 주문 실패', serverBlocked: true }, 503)
+  }
+})
+
+// ── 환율 조회 프록시 (한국은행 API → 원/달러 환율)
+app.get('/api/forex/usd-krw', async (c) => {
+  try {
+    // 네이버 금융 환율 프록시
+    const res = await fetch('https://m.stock.naver.com/front-api/v1/marketIndex/info?category=exchange&marketIndexCategoryCode=FX', {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      // @ts-ignore
+      signal: AbortSignal.timeout(5000),
+    })
+    if (res.ok) {
+      const d: any = await res.json()
+      const usdItem = (d?.result?.list || []).find((x: any) => x.itemCode === 'FX_USDKRW' || x.symbolCode === 'FX_USDKRW')
+      if (usdItem) {
+        return c.json({
+          ok: true,
+          rate: parseFloat(usdItem.closePrice?.replace(/,/g, '') || usdItem.nav?.replace(/,/g, '') || '1380'),
+          source: 'naver',
+        })
+      }
+    }
+  } catch {}
+  // 폴백: 네이버 환율 직접 조회
+  try {
+    const res2 = await fetch('https://finance.naver.com/marketindex/', {
+      headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.naver.com/' },
+      // @ts-ignore
+      signal: AbortSignal.timeout(5000),
+    })
+    if (res2.ok) {
+      const html = await res2.text()
+      // <span class="value">1,380.00</span> 패턴
+      const m = html.match(/USD.*?<span[^>]*class="value"[^>]*>([\d,\.]+)<\/span>/s)
+      if (m) {
+        return c.json({ ok: true, rate: parseFloat(m[1].replace(/,/g, '')), source: 'naver_html' })
+      }
+    }
+  } catch {}
+  // 최종 폴백: 고정값
+  return c.json({ ok: true, rate: 1380, source: 'fallback' })
+})
+
 // ── KIS 토큰 발급 (레거시 경로 — 하위 호환)
 app.post('/api/auth/token', async (c) => {
   const { appKey, appSecret } = await c.req.json().catch(() => ({})) as any
@@ -510,6 +677,30 @@ app.get('/', (c) => {
             class="mode-btn py-2 rounded text-sm font-medium transition">
             🔴 실전
           </button>
+        </div>
+      </div>
+
+      <!-- 시장 선택 -->
+      <div>
+        <label class="text-xs text-gray-400 mb-2 block">시장 선택</label>
+        <div class="grid grid-cols-3 gap-1.5">
+          <button id="market-KR" onclick="setMarket('KR')"
+            class="market-btn active-market py-1.5 rounded text-xs font-medium transition">
+            🇰🇷 국내
+          </button>
+          <button id="market-BOTH" onclick="setMarket('BOTH')"
+            class="market-btn py-1.5 rounded text-xs font-medium transition">
+            🌏 국내+미국
+          </button>
+          <button id="market-US" onclick="setMarket('US')"
+            class="market-btn py-1.5 rounded text-xs font-medium transition">
+            🇺🇸 미국
+          </button>
+        </div>
+        <!-- 환율 패널 (미국/BOTH 모드일 때만 표시) -->
+        <div id="fx-panel" class="hidden mt-2 flex items-center justify-between bg-gray-800/60 rounded px-2.5 py-1.5">
+          <span class="text-xs text-gray-400">💱 환율</span>
+          <span id="fx-rate-display" class="text-xs text-yellow-400 font-medium">$1 = 1,380원</span>
         </div>
       </div>
 
