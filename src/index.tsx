@@ -1333,7 +1333,7 @@ app.get('/', (c) => {
   </div>
 </div>
 
-<script src="/static/app.1786642216.js"></script>
+<script src="/static/app.1786643095.js"></script>
 </body>
 </html>`)
 })
