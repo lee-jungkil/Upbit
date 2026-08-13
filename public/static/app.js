@@ -113,12 +113,16 @@ window.addEventListener('DOMContentLoaded', async () => {
       STATE.liveBalanceTs = Date.now();
       updateStatsUI();
     });
-    // US/BOTH 모드면 달러 잔고도 조회
-    if (STATE.market === 'US' || STATE.market === 'BOTH') {
-      triggerUsdBalanceFetch();
-    }
     // 환율 사전 조회
     if (STATE.market !== 'KR') fetchUsdKrw();
+    // US/BOTH 모드 달러 잔고 조회
+    // BOTH 모드: KR 조회와 동시 토큰 발급 방지 → 15초 딜레이 후 US 조회
+    if (STATE.market === 'US') {
+      triggerUsdBalanceFetch();
+    } else if (STATE.market === 'BOTH') {
+      addLog('info', '⏳ BOTH 모드 — 미국 잔고는 국내 조회 후 15초 뒤 조회합니다');
+      setTimeout(() => triggerUsdBalanceFetch(), 15000);
+    }
   }
 
   // 주기적 UI 갱신: 포지션 가격 + 총자산 카드
@@ -179,6 +183,12 @@ function saveApiKeys() {
         STATE.liveBalanceTs = Date.now();
         updateStatsUI();
       });
+      // US/BOTH 모드면 달러 잔고도 갱신 (BOTH는 KR 완료 후 15초 대기)
+      if (STATE.market === 'US') {
+        setTimeout(() => { STATE.liveBalanceUsdTs = 0; triggerUsdBalanceFetch(); }, 900);
+      } else if (STATE.market === 'BOTH') {
+        setTimeout(() => { STATE.liveBalanceUsdTs = 0; triggerUsdBalanceFetch(); }, 15000);
+      }
     }, 900); // 모달 닫힌 후 조회
   }
   setTimeout(closeApiSettings, 800);
@@ -395,9 +405,11 @@ function setMode(mode) {
         STATE.liveBalanceTs = 0;  // 조회 미완료 유지 (계좌번호 없음 표시용)
         updateStatsUI();
       }
-      // 미국 모드면 달러 잔고도 조회
-      if (STATE.market === 'US' || STATE.market === 'BOTH') {
+      // 미국 모드면 달러 잔고도 조회 (BOTH는 KR 완료 후 15초 대기)
+      if (STATE.market === 'US') {
         triggerUsdBalanceFetch();
+      } else if (STATE.market === 'BOTH') {
+        setTimeout(() => triggerUsdBalanceFetch(), 15000);
       }
     }
   } else {
@@ -1781,8 +1793,11 @@ async function executeEntry(candidate) {
 
 // ─── 실시간 포지션 가격 업데이트 ──────────────────────────────
 async function tickPositions() {
-  // ── 국내 실전 잔고 30초마다 폴링 ─────────────────────────
+  // ── 실전 잔고 폴링 ─────────────────────────────────────────
+  // BOTH 모드: KR=0초 오프셋, US=15초 오프셋 → KIS 초당 API 한도 분산
+  // (토큰 발급 요청이 동시에 몰리지 않도록 타이밍 엇갈리기)
   if (STATE.mode === 'live' && KEYS.appKey && KEYS.accountNo) {
+    // ── 국내 원화 잔고 30초마다 폴링 ─────────────────────────
     if ((STATE.market === 'KR' || STATE.market === 'BOTH')) {
       const elapsed = Date.now() - STATE.liveBalanceTs;
       if (!STATE.liveBalanceFetching && elapsed > 30000) {
@@ -1805,10 +1820,21 @@ async function tickPositions() {
         });
       }
     }
-    // ── 미국 달러 잔고 30초마다 폴링 ───────────────────────
+    // ── 미국 달러 잔고 30초마다 폴링 (BOTH 모드 시 15초 오프셋) ──
     if ((STATE.market === 'US' || STATE.market === 'BOTH')) {
       const elapsedUsd = Date.now() - STATE.liveBalanceUsdTs;
-      if (!STATE.liveBalanceUsdFetching && elapsedUsd > 30000) {
+      // BOTH 모드: 처음 한 번은 KR 조회(liveBalanceTs) 완료 후 15초 뒤부터 시작
+      // → liveBalanceUsdTs === 0 이면 KR 조회가 완료(liveBalanceTs > 0)된 지 15초 경과 후 첫 조회
+      const isBoth = STATE.market === 'BOTH';
+      const krDone = STATE.liveBalanceTs > 0;
+      const krElapsed = Date.now() - STATE.liveBalanceTs;
+      // BOTH 모드 최초 조회: KR 완료 후 15초 대기
+      const canFetchUs = !isBoth || !krDone
+        ? elapsedUsd > 30000           // US 단독 모드 또는 KR 미완료 시 일반 폴링
+        : (STATE.liveBalanceUsdTs === 0
+            ? krElapsed > 15000        // BOTH 최초: KR 완료 15초 후
+            : elapsedUsd > 30000);     // BOTH 이후: 30초마다 일반 폴링
+      if (!STATE.liveBalanceUsdFetching && canFetchUs) {
         STATE.liveBalanceUsdFetching = true;
         getUsLiveBalance().then(usd => {
           const prev = STATE.liveBalanceUsd;

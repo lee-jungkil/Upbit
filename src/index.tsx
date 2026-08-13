@@ -24,63 +24,79 @@ app.get('/favicon.ico', (c) => c.redirect('/favicon.svg', 301))
 
 // ── 인메모리 토큰 캐시 (KV 없을 때 폴백 — Worker 인스턴스 생명주기 동안 유지)
 const _tokenCache: Map<string, { token: string; exp: number }> = new Map()
+// ── 토큰 발급 진행 중인 Promise 뮤텍스 (동일 키로 동시 요청 시 중복 발급 방지)
+const _tokenInflight: Map<string, Promise<{ token: string; error?: string; networkError?: boolean }>> = new Map()
 
 /** 토큰 캐시 무효화 (rt_cd='1' 토큰 만료 시 호출) */
 function invalidateKisToken(appKey: string) {
   const cacheKey = 'kis_token_' + appKey.slice(-8)
   _tokenCache.delete(cacheKey)
+  _tokenInflight.delete(cacheKey) // 진행 중인 요청도 제거
 }
 
 async function getKisToken(env: Bindings & Record<string, string>, appKey: string, appSecret: string): Promise<{ token: string; error?: string; networkError?: boolean }> {
-  try {
-    const cacheKey = 'kis_token_' + appKey.slice(-8)
+  const cacheKey = 'kis_token_' + appKey.slice(-8)
 
-    // 1) KV 캐시 조회
-    if (env.KV) {
-      const cached = await env.KV.get(cacheKey)
-      if (cached) return { token: cached }
-    }
-
-    // 2) 인메모리 캐시 조회 (KV 없을 때 폴백 — 토큰 재발급 횟수 제한 방지)
-    const memCached = _tokenCache.get(cacheKey)
-    if (memCached && Date.now() < memCached.exp) {
-      return { token: memCached.token }
-    }
-
-    const res = await fetch('https://openapi.koreainvestment.com:9443/oauth2/tokenP', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        grant_type: 'client_credentials',
-        appkey: appKey,
-        appsecret: appSecret,
-      }),
-      // @ts-ignore
-      signal: AbortSignal.timeout(8000),
-    })
-    const data: any = await res.json()
-    if (!res.ok || !data.access_token) {
-      // KIS 서버에 도달했으나 인증 실패 (잘못된 키 등) → networkError=false
-      const kisMsg = data.error_description || data.msg1 || data.message || JSON.stringify(data).slice(0, 120)
-      return { token: '', error: `KIS 인증 오류: ${kisMsg}`, networkError: false }
-    }
-    const token = data.access_token
-
-    // 3) KV에 저장 (있으면)
-    if (env.KV) {
-      await env.KV.put(cacheKey, token, { expirationTtl: 82800 })
-    }
-    // 4) 인메모리에도 저장 (KV 없을 때 폴백 — 22.5시간 TTL)
-    _tokenCache.set(cacheKey, { token, exp: Date.now() + 82800 * 1000 })
-
-    return { token }
-  } catch (e: any) {
-    const msg = e?.message || String(e)
-    if (msg.includes('fetch') || msg.includes('connect') || msg.includes('network') || msg.includes('timeout')) {
-      return { token: '', error: '서버→KIS 네트워크 연결 실패 (타임아웃/차단)', networkError: true }
-    }
-    return { token: '', error: msg }
+  // 1) KV 캐시 조회
+  if (env.KV) {
+    const cached = await env.KV.get(cacheKey)
+    if (cached) return { token: cached }
   }
+
+  // 2) 인메모리 캐시 조회 (KV 없을 때 폴백 — 토큰 재발급 횟수 제한 방지)
+  const memCached = _tokenCache.get(cacheKey)
+  if (memCached && Date.now() < memCached.exp) {
+    return { token: memCached.token }
+  }
+
+  // 3) 동일 키로 이미 토큰 발급 진행 중이면 같은 Promise 대기 (중복 발급 방지)
+  //    BOTH 모드에서 KR + US 요청이 동시 도달해도 토큰 발급은 1회만 실행됨
+  const inflight = _tokenInflight.get(cacheKey)
+  if (inflight) return inflight
+
+  const issuePromise = (async (): Promise<{ token: string; error?: string; networkError?: boolean }> => {
+    try {
+      const res = await fetch('https://openapi.koreainvestment.com:9443/oauth2/tokenP', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          grant_type: 'client_credentials',
+          appkey: appKey,
+          appsecret: appSecret,
+        }),
+        // @ts-ignore
+        signal: AbortSignal.timeout(8000),
+      })
+      const data: any = await res.json()
+      if (!res.ok || !data.access_token) {
+        // KIS 서버에 도달했으나 인증 실패 (잘못된 키 등) → networkError=false
+        const kisMsg = data.error_description || data.msg1 || data.message || JSON.stringify(data).slice(0, 120)
+        return { token: '', error: `KIS 인증 오류: ${kisMsg}`, networkError: false }
+      }
+      const token = data.access_token
+
+      // KV에 저장 (있으면)
+      if (env.KV) {
+        await env.KV.put(cacheKey, token, { expirationTtl: 82800 })
+      }
+      // 인메모리에도 저장 (KV 없을 때 폴백 — 22.5시간 TTL)
+      _tokenCache.set(cacheKey, { token, exp: Date.now() + 82800 * 1000 })
+
+      return { token }
+    } catch (e: any) {
+      const msg = e?.message || String(e)
+      if (msg.includes('fetch') || msg.includes('connect') || msg.includes('network') || msg.includes('timeout')) {
+        return { token: '', error: '서버→KIS 네트워크 연결 실패 (타임아웃/차단)', networkError: true }
+      }
+      return { token: '', error: msg }
+    } finally {
+      // 완료 후 뮤텍스 제거 (다음 요청은 새로 발급 가능)
+      _tokenInflight.delete(cacheKey)
+    }
+  })()
+
+  _tokenInflight.set(cacheKey, issuePromise)
+  return issuePromise
 }
 
 // ─────────────────────────────────────────────
