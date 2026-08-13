@@ -457,15 +457,14 @@ function setMarket(market) {
       addLog('info', `💵 페이퍼 달러 잔고 초기화: $${STATE.paperBalanceUsd.toFixed(2)}`);
     }
   } else if (market === 'BOTH') {
-    addLog('info', '🌏 국내+미국 동시 모드');
-    addLog('info', `   ∙ 자본 배분: 미국 ${Math.round(STATE.config.usRatio * 100)}% / 국내 ${Math.round((1-STATE.config.usRatio)*100)}%`);
+    addLog('info', '🌏 국내+미국 동시 모드 (국내/미국 각 100% 독립 — 시간대 분리)');
     if (STATE.mode === 'live') triggerUsdBalanceFetch();
-    // 페이퍼 모드에서 BOTH로 전환 시 달러 잔고 재배분
+    // 페이퍼 모드에서 BOTH로 전환 시 달러 잔고 초기화 (각 100%)
     if (STATE.mode === 'paper' && STATE.config.paperCapital > 0) {
-      const usdPart = STATE.config.paperCapital * STATE.config.usRatio;
+      const usdPart = STATE.config.paperCapital; // 미국도 100%
       STATE.paperBalanceUsd = usdPart / STATE.usdKrw;
-      STATE.paperBalance = STATE.config.paperCapital * (1 - STATE.config.usRatio);
-      addLog('info', `💵 페이퍼 자본 재배분: 국내 ${fmtManwon(STATE.paperBalance)} / 미국 $${STATE.paperBalanceUsd.toFixed(2)}`);
+      STATE.paperBalance = STATE.config.paperCapital; // 국내도 100%
+      addLog('info', `💵 페이퍼 자본: 국내 ${fmtManwon(STATE.paperBalance)} / 미국 $${STATE.paperBalanceUsd.toFixed(2)} (각 100%)`);
     }
   }
 
@@ -481,19 +480,39 @@ function setMarket(market) {
 }
 
 function triggerUsdBalanceFetch() {
-  if (!KEYS.appKey || !KEYS.accountNo || STATE.liveBalanceUsdFetching) return;
+  // 봇 실행 중이면 스캔 배치 조회에서 잔고도 함께 처리 → 중복 호출 안 함
+  if (!KEYS.appKey || !KEYS.accountNo || STATE.liveBalanceUsdFetching || STATE.running) return;
   STATE.liveBalanceUsdFetching = true;
-  getUsLiveBalance().then(usd => {
-    STATE.liveBalanceUsd    = usd;
-    STATE.liveBalanceUsdTs  = Date.now();
+  // 잔고만 조회 (symbols=[] 빈 배열, accountNo 전달) → 토큰 1회 발급
+  fetch('/api/kis/us/prices', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      appKey: KEYS.appKey, appSecret: KEYS.appSecret,
+      symbols: [{ ticker: 'AAPL', excd: 'NAS' }], // 최소 1개 필요 (빈 배열 에러 방지)
+      accountNo: KEYS.accountNo,
+    }),
+    signal: AbortSignal.timeout(15000),
+  }).then(r => r.json()).then(data => {
     STATE.liveBalanceUsdFetching = false;
-    if (usd > 0) {
-      addLog('info', `💵 미국주식 달러 잔고: $${usd.toFixed(2)} (≈${fmtPrice(Math.round(usd * STATE.usdKrw))}원)`);
-    } else if (STATE.liveBalanceKrwForUs > 0) {
-      addLog('info', `💴 통합증거금 원화 잔고: ${fmtPrice(STATE.liveBalanceKrwForUs)}원 (환전 없이 해외주식 매수 가능)`);
+    if (data.balance && data.balance.cashUsd >= 0) {
+      STATE.liveBalanceUsd    = data.balance.cashUsd;
+      STATE.liveBalanceUsdTs  = Date.now();
+      if (data.balance.cashKrw > 0) STATE.liveBalanceKrwForUs = data.balance.cashKrw;
+      if (data.balance.cashUsd > 0) {
+        addLog('info', `💵 미국주식 달러 잔고: $${data.balance.cashUsd.toFixed(2)} (≈${fmtPrice(Math.round(data.balance.cashUsd * STATE.usdKrw))}원)`);
+      } else if (data.balance.cashKrw > 0) {
+        addLog('info', `💴 통합증거금 원화 잔고: ${fmtPrice(data.balance.cashKrw)}원 (환전 없이 해외주식 매수 가능)`);
+      }
+    } else if (data.error) {
+      addLog('warn', `⚠️ 미국주식 잔고 오류: ${data.error}`);
+      STATE.liveBalanceUsdTs = Date.now();
     }
     updateStatsUI();
-  }).catch(() => { STATE.liveBalanceUsdFetching = false; });
+  }).catch(() => {
+    STATE.liveBalanceUsdFetching = false;
+    STATE.liveBalanceUsdTs = Date.now();
+  });
 }
 
 function updateSlider(id, labelId, suffix) {
@@ -1065,18 +1084,17 @@ async function startBot() {
   STATE.running = true;
   STATE.paperBalance = STATE.config.paperCapital;
 
-  // US / BOTH 모드: 페이퍼 달러 잔고 초기화
-  // 자본금의 usRatio 비율만큼 달러로 배분 (원화→달러 환산)
+  // US / BOTH 모드: 페이퍼 달러 잔고 초기화 (각 시장 100% 독립)
   if (STATE.mode === 'paper') {
     if (STATE.market === 'US') {
       STATE.paperBalanceUsd = STATE.config.paperCapital / STATE.usdKrw;
-      STATE.paperBalance = 0; // US 모드는 원화 잔고 불필요
+      STATE.paperBalance = 0;
       addLog('info', `💵 페이퍼 달러 잔고 초기화: $${STATE.paperBalanceUsd.toFixed(2)} (환율 ${fmtPrice(STATE.usdKrw)}원/달러)`);
     } else if (STATE.market === 'BOTH') {
-      const usdPart = STATE.config.paperCapital * STATE.config.usRatio;
-      STATE.paperBalanceUsd = usdPart / STATE.usdKrw;
-      STATE.paperBalance = STATE.config.paperCapital * (1 - STATE.config.usRatio);
-      addLog('info', `🌏 페이퍼 자본 배분: 국내 ${fmtManwon(STATE.paperBalance)} / 미국 $${STATE.paperBalanceUsd.toFixed(2)}`);
+      // 국내/미국 각 100% 독립 — 시간대가 달라 동시 투자 없음
+      STATE.paperBalanceUsd = STATE.config.paperCapital / STATE.usdKrw;
+      STATE.paperBalance = STATE.config.paperCapital;
+      addLog('info', `🌏 페이퍼 자본: 국내 ${fmtManwon(STATE.paperBalance)} / 미국 $${STATE.paperBalanceUsd.toFixed(2)} (각 100%)`);
     } else {
       // KR 모드: 달러 잔고 불필요
       STATE.paperBalanceUsd = 0;
@@ -1441,20 +1459,18 @@ async function scanForEntries() {
     if (isUsMarketOpen() || STATE.mode === 'paper') {
       candidates = await generateUsCandidates();
     }
-  } else { // BOTH
-    // 열린 시장 쪽만 스캔 (동시 개장 시 둘 다)
-    const krSlots = Math.ceil(STATE.config.maxPositions * (1 - STATE.config.usRatio));
-    const usSlots = Math.floor(STATE.config.maxPositions * STATE.config.usRatio);
+  } else { // BOTH — 국내/미국 각 100% 독립 (시간대 다름, 자본 분리 불필요)
+    const maxPos = STATE.config.maxPositions;
     const krPosCount = STATE.positions.filter(p => p.market !== 'US').length;
     const usPosCount = STATE.positions.filter(p => p.market === 'US').length;
 
-    if ((isKrMarketOpen() || STATE.mode === 'paper') && krPosCount < krSlots) {
+    if ((isKrMarketOpen() || STATE.mode === 'paper') && krPosCount < maxPos) {
       const krCands = await generateKrCandidates();
-      candidates.push(...krCands.slice(0, krSlots - krPosCount));
+      candidates.push(...krCands.slice(0, maxPos - krPosCount));
     }
-    if ((isUsMarketOpen() || STATE.mode === 'paper') && usPosCount < usSlots) {
+    if ((isUsMarketOpen() || STATE.mode === 'paper') && usPosCount < maxPos) {
       const usCands = await generateUsCandidates();
-      candidates.push(...usCands.slice(0, usSlots - usPosCount));
+      candidates.push(...usCands.slice(0, maxPos - usPosCount));
     }
   }
 
@@ -1728,7 +1744,7 @@ async function executeEntry(candidate) {
   if (STATE.mode === 'paper') {
     // 페이퍼 BOTH 모드에서 봇 시작 전 시장 전환 등으로 달러 잔고가 초기화 안 됐을 때 자동 복구
     if (isUs && STATE.paperBalanceUsd <= 0 && STATE.config.paperCapital > 0) {
-      const usdRatio = STATE.market === 'BOTH' ? STATE.config.usRatio : 1.0;
+      const usdRatio = 1.0; // BOTH 모드에서도 미국 자본 100% (국내와 시간대 다름)
       STATE.paperBalanceUsd = (STATE.config.paperCapital * usdRatio) / STATE.usdKrw;
       addLog('info', `💵 페이퍼 달러 잔고 자동 초기화: $${STATE.paperBalanceUsd.toFixed(2)}`);
     }
