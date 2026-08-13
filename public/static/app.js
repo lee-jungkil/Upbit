@@ -1627,6 +1627,8 @@ async function generateUsCandidates() {
       const data = await res.json();
       if (!res.ok || !data.ok) {
         addLog('warn', `⚠️ 미국주식 시세 배치 조회 실패 — ${data.error || res.status}`);
+        // 배치 조회 실패해도 ts 갱신 → executeEntry에서 "미조회 상태" 무한 스킵 방지
+        if (STATE.liveBalanceUsdTs === 0) STATE.liveBalanceUsdTs = Date.now();
         return generateUsSimCandidates(strategy, ap);
       }
       // ── 잔고 결과 처리 (같은 토큰으로 동시 조회됨 — 토큰 추가 발급 없음)
@@ -1685,6 +1687,8 @@ async function generateUsCandidates() {
       }
     } catch(e) {
       addLog('warn', '⚠️ 미국주식 스캔 오류 — 시뮬레이션 사용: ' + (e?.message || ''));
+      // catch 이후에도 ts 갱신 → "미조회 상태" 무한 스킵 방지
+      if (STATE.liveBalanceUsdTs === 0) STATE.liveBalanceUsdTs = Date.now();
     }
   }
 
@@ -1749,11 +1753,17 @@ async function executeEntry(candidate) {
       addLog('info', `💵 페이퍼 달러 잔고 자동 초기화: $${STATE.paperBalanceUsd.toFixed(2)}`);
     }
     available = isUs ? (STATE.paperBalanceUsd * STATE.usdKrw) : STATE.paperBalance;
-  } else {
+    } else {
     // ── 실전 모드: generateUsCandidates 배치 조회에서 이미 잔고 갱신됨 → 캐시만 사용
     if (isUs) {
       const cachedUsd = STATE.liveBalanceUsd;
       const cacheAge  = Date.now() - STATE.liveBalanceUsdTs;
+      // 아직 한 번도 잔고 조회가 완료되지 않은 상태(liveBalanceUsdTs=0) → 조용히 스킵
+      // (배치 조회 응답 대기 중이므로 warn 로그 불필요)
+      if (STATE.liveBalanceUsdTs === 0) {
+        addLog('info', `⏳ 미국주식 잔고 조회 대기 중... (다음 스캔에서 재시도)`);
+        return;
+      }
 
       if (cachedUsd > 0 && cacheAge < 120000) {
         // 캐시 신선 → 그대로 사용
@@ -1789,7 +1799,9 @@ async function executeEntry(candidate) {
     // (통합증거금 원화인 경우는 원화 그대로 표시)
     const isKrwMode = isUs && STATE.liveBalanceKrwForUs > 0 && STATE.liveBalanceUsd === 0;
     const dispStr = (isUs && !isKrwMode) ? `$${(available / STATE.usdKrw).toFixed(2)}` : `${fmtPrice(available)}원`;
-    addLog('warn', `⚠️ 가용 자금 부족: ${dispStr}`);
+    // 실전 US: 잔고 조회 완료(ts > 0) 된 이후에만 warn — 미조회 상태는 위에서 이미 return됨
+    // 조회는 됐는데 실제 잔고가 0이면 진짜 부족 경고
+    addLog('warn', `⚠️ 가용 자금 부족: ${dispStr} — 계좌 잔고를 확인하세요`);
     return;
   }
 
