@@ -1568,37 +1568,37 @@ async function generateUsCandidates() {
   const strategy = document.getElementById('strategy-select').value || STATE.strategy;
   const ap = (ADAPTIVE_PARAMS[strategy] || ADAPTIVE_PARAMS.scalping)[STATE.adaptiveMode];
 
-  // 나스닥100 + S&P500 주요 종목 고정 리스트
+  // 나스닥 + NYSE 주요 종목 고정 리스트 (전체 조회)
   const US_STOCKS = [
     // 나스닥 대형주
-    { ticker: 'AAPL',  name: 'Apple',         basePrice: 228,  excd: 'NAS' },
-    { ticker: 'MSFT',  name: 'Microsoft',     basePrice: 430,  excd: 'NAS' },
-    { ticker: 'NVDA',  name: 'NVIDIA',        basePrice: 130,  excd: 'NAS' },
-    { ticker: 'AMZN',  name: 'Amazon',        basePrice: 195,  excd: 'NAS' },
-    { ticker: 'GOOGL', name: 'Alphabet',      basePrice: 175,  excd: 'NAS' },
-    { ticker: 'META',  name: 'Meta',          basePrice: 560,  excd: 'NAS' },
-    { ticker: 'TSLA',  name: 'Tesla',         basePrice: 250,  excd: 'NAS' },
-    { ticker: 'AVGO',  name: 'Broadcom',      basePrice: 185,  excd: 'NAS' },
-    { ticker: 'AMD',   name: 'AMD',           basePrice: 145,  excd: 'NAS' },
-    { ticker: 'INTC',  name: 'Intel',         basePrice: 22,   excd: 'NAS' },
+    { ticker: 'AAPL',  name: 'Apple',         excd: 'NAS' },
+    { ticker: 'MSFT',  name: 'Microsoft',     excd: 'NAS' },
+    { ticker: 'NVDA',  name: 'NVIDIA',        excd: 'NAS' },
+    { ticker: 'AMZN',  name: 'Amazon',        excd: 'NAS' },
+    { ticker: 'GOOGL', name: 'Alphabet',      excd: 'NAS' },
+    { ticker: 'META',  name: 'Meta',          excd: 'NAS' },
+    { ticker: 'TSLA',  name: 'Tesla',         excd: 'NAS' },
+    { ticker: 'AVGO',  name: 'Broadcom',      excd: 'NAS' },
+    { ticker: 'AMD',   name: 'AMD',           excd: 'NAS' },
+    { ticker: 'INTC',  name: 'Intel',         excd: 'NAS' },
     // NYSE 대형주
-    { ticker: 'JPM',   name: 'JPMorgan',      basePrice: 245,  excd: 'NYS' },
-    { ticker: 'V',     name: 'Visa',          basePrice: 280,  excd: 'NYS' },
-    { ticker: 'XOM',   name: 'ExxonMobil',    basePrice: 115,  excd: 'NYS' },
-    { ticker: 'BRK.B', name: 'Berkshire B',   basePrice: 460,  excd: 'NYS' },
-    { ticker: 'UNH',   name: 'UnitedHealth',  basePrice: 530,  excd: 'NYS' },
-    { ticker: 'JNJ',   name: 'J&J',           basePrice: 160,  excd: 'NYS' },
-    { ticker: 'WMT',   name: 'Walmart',       basePrice: 88,   excd: 'NYS' },
-    { ticker: 'MA',    name: 'Mastercard',    basePrice: 530,  excd: 'NYS' },
-    { ticker: 'PG',    name: 'P&G',           basePrice: 165,  excd: 'NYS' },
-    { ticker: 'LLY',   name: 'Eli Lilly',     basePrice: 790,  excd: 'NYS' },
+    { ticker: 'JPM',   name: 'JPMorgan',      excd: 'NYS' },
+    { ticker: 'V',     name: 'Visa',          excd: 'NYS' },
+    { ticker: 'XOM',   name: 'ExxonMobil',    excd: 'NYS' },
+    { ticker: 'UNH',   name: 'UnitedHealth',  excd: 'NYS' },
+    { ticker: 'WMT',   name: 'Walmart',       excd: 'NYS' },
+    { ticker: 'MA',    name: 'Mastercard',    excd: 'NYS' },
+    { ticker: 'LLY',   name: 'Eli Lilly',     excd: 'NYS' },
+    { ticker: 'NFLX',  name: 'Netflix',       excd: 'NAS' },
+    { ticker: 'CRM',   name: 'Salesforce',    excd: 'NYS' },
+    { ticker: 'COIN',  name: 'Coinbase',      excd: 'NAS' },
   ];
 
-  // 실전 모드: KIS API로 현재가 조회 후 필터링
+  // 실전 모드: KIS API로 전체 종목 현재가 병렬 조회 (국내주식과 동일한 방식)
   if (STATE.mode === 'live' && KEYS.appKey) {
     try {
-      const shuffled = [...US_STOCKS].sort(() => Math.random() - 0.5).slice(0, 10);
-      const results = await Promise.all(shuffled.map(async (s) => {
+      // 전체 20개 병렬 조회 (셔플 없이 — 국내주식 거래량순위와 동일 구조)
+      const results = await Promise.all(US_STOCKS.map(async (s) => {
         try {
           const res = await fetch('/api/kis/us/price', {
             method: 'POST',
@@ -1607,25 +1607,37 @@ async function generateUsCandidates() {
               appKey: KEYS.appKey, appSecret: KEYS.appSecret,
               symbol: s.ticker, excd: s.excd,
             }),
+            signal: AbortSignal.timeout(8000),
           });
           const data = await res.json();
           if (data.ok && data.price > 0) {
-            return { ...s, price: data.price, pctChange: data.changeRate, volume: data.volume };
+            return { ...s, price: data.price, pctChange: data.changeRate ?? 0, volume: data.volume ?? 0 };
           }
-        } catch {}
-        return null;
+          // 개별 실패 시 조용히 null 반환
+          return null;
+        } catch { return null; }
       }));
+
       const valid = results.filter(Boolean);
+      addLog('scan', `   🇺🇸 미국주식 시세 조회: ${valid.length}/${US_STOCKS.length}개 성공`);
+
       if (valid.length > 0) {
-        const filtered = valid.filter(item => {
-          const pct = item.pctChange || 0;
-          if (strategy === 'scalping')       return pct > ap.pctMin && pct < ap.pctMax;
-          if (strategy === 'volume')         return pct > 0;
-          if (strategy === 'momentum')       return pct > ap.pctMin;
-          if (strategy === 'mean_reversion') return pct < ap.pctMin;
-          return true;
-        });
-        const candidates = filtered.slice(0, 3).map(item => ({
+        // ── 국내주식과 동일한 방식: 전략별 정렬 기준만 적용, 엄격한 수치 필터 없음
+        let sorted;
+        if (strategy === 'mean_reversion') {
+          // 하락폭 큰 순 (반등 노림)
+          sorted = valid.filter(i => (i.pctChange || 0) < 0)
+                        .sort((a, b) => (a.pctChange || 0) - (b.pctChange || 0));
+          if (sorted.length === 0) sorted = valid.sort((a, b) => (a.pctChange || 0) - (b.pctChange || 0));
+        } else if (strategy === 'momentum') {
+          // 상승폭 큰 순
+          sorted = valid.sort((a, b) => (b.pctChange || 0) - (a.pctChange || 0));
+        } else {
+          // scalping / volume: 등락률 절댓값 큰 순 (국내 거래량 상위와 동일 개념)
+          sorted = valid.sort((a, b) => Math.abs(b.pctChange || 0) - Math.abs(a.pctChange || 0));
+        }
+
+        const candidates = sorted.slice(0, 5).map(item => ({
           ticker:    item.ticker,
           name:      item.name,
           price:     item.price,
@@ -1634,13 +1646,17 @@ async function generateUsCandidates() {
           market:    'US',
           excd:      item.excd,
         }));
+
         if (candidates.length > 0) {
-          addLog('scan', `   🇺🇸 미국주식 후보 ${candidates.length}개 (실시간)`);
+          const topStr = candidates.slice(0,3).map(c => `${c.ticker}(${c.pctChange>0?'+':''}${(c.pctChange||0).toFixed(2)}%)`).join(', ');
+          addLog('scan', `   🇺🇸 미국주식 후보 ${candidates.length}개 (실시간) — ${topStr}`);
           return candidates;
         }
+      } else {
+        addLog('warn', '⚠️ 미국주식 시세 전체 조회 실패 — 시뮬레이션 사용');
       }
     } catch(e) {
-      addLog('warn', '⚠️ 미국주식 시세 조회 실패 — 시뮬레이션 사용: ' + e.message);
+      addLog('warn', '⚠️ 미국주식 스캔 오류 — 시뮬레이션 사용: ' + (e?.message || ''));
     }
   }
 
@@ -1649,58 +1665,46 @@ async function generateUsCandidates() {
 }
 
 function generateUsSimCandidates(strategy, ap) {
+  // 국내 generateSimCandidates와 동일 구조 — 엄격한 복합 조건 제거, 등락률 정렬로 대체
   const US_STOCKS = [
-    { ticker: 'AAPL',  name: 'Apple',         basePrice: 228 },
-    { ticker: 'MSFT',  name: 'Microsoft',     basePrice: 430 },
-    { ticker: 'NVDA',  name: 'NVIDIA',        basePrice: 130 },
-    { ticker: 'AMZN',  name: 'Amazon',        basePrice: 195 },
-    { ticker: 'GOOGL', name: 'Alphabet',      basePrice: 175 },
-    { ticker: 'META',  name: 'Meta',          basePrice: 560 },
-    { ticker: 'TSLA',  name: 'Tesla',         basePrice: 250 },
-    { ticker: 'AMD',   name: 'AMD',           basePrice: 145 },
-    { ticker: 'JPM',   name: 'JPMorgan',      basePrice: 245 },
-    { ticker: 'INTC',  name: 'Intel',         basePrice: 22  },
+    { ticker: 'AAPL',  name: 'Apple',      basePrice: 228 },
+    { ticker: 'MSFT',  name: 'Microsoft',  basePrice: 430 },
+    { ticker: 'NVDA',  name: 'NVIDIA',     basePrice: 130 },
+    { ticker: 'AMZN',  name: 'Amazon',     basePrice: 195 },
+    { ticker: 'GOOGL', name: 'Alphabet',   basePrice: 175 },
+    { ticker: 'META',  name: 'Meta',       basePrice: 560 },
+    { ticker: 'TSLA',  name: 'Tesla',      basePrice: 250 },
+    { ticker: 'AMD',   name: 'AMD',        basePrice: 145 },
+    { ticker: 'JPM',   name: 'JPMorgan',   basePrice: 245 },
+    { ticker: 'INTC',  name: 'Intel',      basePrice: 22  },
+    { ticker: 'NFLX',  name: 'Netflix',    basePrice: 720 },
+    { ticker: 'CRM',   name: 'Salesforce', basePrice: 310 },
   ];
   const adap = ap || (ADAPTIVE_PARAMS[strategy] || ADAPTIVE_PARAMS.scalping)[STATE.adaptiveMode];
-  const results = [];
-  const shuffled = [...US_STOCKS].sort(() => Math.random() - 0.5);
 
-  for (const s of shuffled.slice(0, 7)) {
-    // 달러 소수점 변동 시뮬레이션
-    const pctChange   = (Math.random() - 0.3) * 4;
-    const volMult     = 1 + Math.random() * 3;
-    const rsi         = 30 + Math.random() * 50;
-    const buyPressure = 0.8 + Math.random() * 0.8;
-    const price       = Math.round(s.basePrice * (1 + pctChange / 100) * 100) / 100;
+  // 모든 종목에 랜덤 변동률 부여 후 전략별 정렬 (조건 필터 없음 — 항상 결과 보장)
+  const simulated = US_STOCKS.map(s => {
+    const pctChange = parseFloat(((Math.random() - 0.35) * 5).toFixed(2));
+    const price     = Math.round(s.basePrice * (1 + pctChange / 100) * 100) / 100;
+    return {
+      ticker:    s.ticker,
+      name:      s.name,
+      price,
+      pctChange,
+      score:     Math.min(100, Math.max(0, Math.round(50 + Math.random() * 40) + (adap.scoreBonus || 0))),
+      market:    'US',
+    };
+  });
 
-    let pass = false;
-    if (strategy === 'scalping') {
-      pass = pctChange > adap.pctMin && pctChange < adap.pctMax
-          && rsi > (adap.rsiMin || 35) && rsi < (adap.rsiMax || 65)
-          && volMult >= (adap.volMult || 1.5)
-          && buyPressure >= (adap.buyPressure || 1.2);
-    } else if (strategy === 'volume') {
-      pass = volMult >= adap.volMult && pctChange > 0 && rsi < (adap.rsiMax || 70);
-    } else if (strategy === 'momentum') {
-      pass = pctChange > adap.pctMin && volMult >= adap.volMult;
-    } else if (strategy === 'mean_reversion') {
-      pass = pctChange < adap.pctMin && rsi < (adap.rsiMax || 30);
-    }
-
-    if (pass) {
-      results.push({
-        ticker:    s.ticker,
-        name:      s.name,
-        price,
-        pctChange: parseFloat(pctChange.toFixed(2)),
-        volume:    Math.round(1000000 * volMult),
-        rsi:       parseFloat(rsi.toFixed(1)),
-        score:     Math.min(100, Math.max(0, Math.round(50 + Math.random() * 40) + (adap.scoreBonus || 0))),
-        market:    'US',
-      });
-    }
+  let sorted;
+  if (strategy === 'mean_reversion') {
+    sorted = simulated.sort((a, b) => a.pctChange - b.pctChange); // 하락 큰 순
+  } else if (strategy === 'momentum') {
+    sorted = simulated.sort((a, b) => b.pctChange - a.pctChange); // 상승 큰 순
+  } else {
+    sorted = simulated.sort((a, b) => Math.abs(b.pctChange) - Math.abs(a.pctChange)); // 변동 큰 순
   }
-  return results;
+  return sorted.slice(0, 5);
 }
 
 // 매수 실행 (국내/미국 통합)
