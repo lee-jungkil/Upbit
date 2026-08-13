@@ -1433,12 +1433,8 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
       addLog('error', `❌ 매도 실패: ${pos.ticker} — ${e.message}`);
     }
   } else {
-    // 페이퍼: 현금 반환
-    if (isUs) {
-      STATE.paperBalanceUsd += investAmt + (investAmt * netPnlPct / 100);
-    } else {
-      STATE.paperBalance += Math.round(investAmt + profitAmt);
-    }
+    // 페이퍼: 현금 반환 (국내·미국 모두 원화)
+    STATE.paperBalance += Math.round(investAmt + profitAmt);
   }
 
   STATE.stats.totalTrades++;
@@ -1796,67 +1792,41 @@ async function executeEntry(candidate) {
   // ── 가용 자금 조회 ─────────────────────────────────────
   let available;
   if (STATE.mode === 'paper') {
-    // 페이퍼 BOTH 모드에서 봇 시작 전 시장 전환 등으로 달러 잔고가 초기화 안 됐을 때 자동 복구
-    if (isUs && STATE.paperBalanceUsd <= 0 && STATE.config.paperCapital > 0) {
-      const usdRatio = 1.0; // BOTH 모드에서도 미국 자본 100% (국내와 시간대 다름)
-      STATE.paperBalanceUsd = (STATE.config.paperCapital * usdRatio) / STATE.usdKrw;
-      addLog('info', `💵 페이퍼 달러 잔고 자동 초기화: $${STATE.paperBalanceUsd.toFixed(2)}`);
+    // 페이퍼: 국내·미국 모두 원화 기준 (달러 시뮬레이션 제거)
+    if (isUs && STATE.paperBalance <= 0 && STATE.config.paperCapital > 0) {
+      STATE.paperBalance = STATE.config.paperCapital;
     }
-    available = isUs ? (STATE.paperBalanceUsd * STATE.usdKrw) : STATE.paperBalance;
+    available = STATE.paperBalance;
+  } else {
+    // ── 실전: 국내·미국 모두 원화 잔고 사용 (통합증거금 계좌 — 달러 불필요)
+    const cachedKrw = STATE.liveBalance;
+    const cacheAge  = Date.now() - STATE.liveBalanceTs;
+    if (cachedKrw > 0 && cacheAge < 120000) {
+      available = cachedKrw;
+    } else if (cachedKrw > 0) {
+      // 캐시 만료 → 그대로 폴백 (곧 갱신됨)
+      available = cachedKrw;
     } else {
-    // ── 실전 모드: generateUsCandidates 배치 조회에서 이미 잔고 갱신됨 → 캐시만 사용
-    if (isUs) {
-      const cachedUsd = STATE.liveBalanceUsd;
-      const cacheAge  = Date.now() - STATE.liveBalanceUsdTs;
-      // 아직 한 번도 잔고 조회가 완료되지 않은 상태(liveBalanceUsdTs=0) → 조용히 스킵
-      // (배치 조회 응답 대기 중이므로 warn 로그 불필요)
-      if (STATE.liveBalanceUsdTs === 0) {
-        addLog('info', `⏳ 미국주식 잔고 조회 대기 중... (다음 스캔에서 재시도)`);
-        return;
-      }
-
-      if (cachedUsd > 0 && cacheAge < 120000) {
-        // 캐시 신선 → 그대로 사용
-        available = cachedUsd * STATE.usdKrw;
-      } else {
-        // 캐시 만료 또는 미조회 → 이전 캐시 폴백 (배치 조회가 곧 갱신)
-        available = cachedUsd > 0 ? cachedUsd * STATE.usdKrw : 0;
-      }
-      // ── 통합증거금: 달러 잔고=0이어도 원화 가용금액이 있으면 매수 가능
-      // liveBalanceKrwForUs 없으면 liveBalance(국내 원화)를 통합증거금으로 간주
-      if (available < 10000) {
-        const krwFallback = STATE.liveBalanceKrwForUs || STATE.liveBalance;
-        if (krwFallback > 0) {
-          available = krwFallback;
-          if (STATE.liveBalanceKrwForUs === 0) STATE.liveBalanceKrwForUs = krwFallback; // 동기화
-          addLog('info', `💴 통합증거금 원화 잔고로 매수: ${fmtPrice(available)}원`);
-        }
-      }
-    } else {
-      const cachedKrw = STATE.liveBalance;
-      const cacheAge  = Date.now() - STATE.liveBalanceTs;
-      if (cachedKrw > 0 && cacheAge < 120000) {
-        available = cachedKrw;
-      } else {
-        try {
-          const freshKrw = await getLiveBalance();
+      // 미조회 → 직접 조회 1회
+      try {
+        const freshKrw = await getLiveBalance();
+        if (freshKrw > 0) {
+          STATE.liveBalance = freshKrw;
+          STATE.liveBalanceTs = Date.now();
+          STATE.liveBalanceKrwForUs = freshKrw;
           available = freshKrw;
-          if (freshKrw > 0) { STATE.liveBalance = freshKrw; STATE.liveBalanceTs = Date.now(); STATE.liveBalanceKrwForUs = freshKrw; }
-          else if (cachedKrw > 0) available = cachedKrw; // 폴백
-        } catch {
-          available = cachedKrw > 0 ? cachedKrw : 0;
+        } else {
+          addLog('warn', '⚠️ 원화 잔고 조회 완료 — 주문 가능 현금 없음 (KIS 앱 확인 권장)');
+          return;
         }
+      } catch {
+        addLog('warn', '⚠️ 원화 잔고 조회 실패 — 잠시 후 재시도');
+        return;
       }
     }
   }
   if (available < 10000) {
-    // isUs: available은 이미 원화 환산값이므로 달러로 되돌려 표시
-    // (통합증거금 원화인 경우는 원화 그대로 표시)
-    const isKrwMode = isUs && STATE.liveBalanceKrwForUs > 0 && STATE.liveBalanceUsd === 0;
-    const dispStr = (isUs && !isKrwMode) ? `$${(available / STATE.usdKrw).toFixed(2)}` : `${fmtPrice(available)}원`;
-    // 실전 US: 잔고 조회 완료(ts > 0) 된 이후에만 warn — 미조회 상태는 위에서 이미 return됨
-    // 조회는 됐는데 실제 잔고가 0이면 진짜 부족 경고
-    addLog('warn', `⚠️ 가용 자금 부족: ${dispStr} — 계좌 잔고를 확인하세요`);
+    addLog('warn', `⚠️ 가용 자금 부족: ${fmtPrice(available)}원 — 계좌 원화 잔고를 확인하세요`);
     return;
   }
 
@@ -1918,12 +1888,8 @@ async function executeEntry(candidate) {
       return;
     }
   } else {
-    // 페이퍼 모드: 잔고 차감
-    if (isUs) {
-      STATE.paperBalanceUsd -= qtyInt * price;
-    } else {
-      STATE.paperBalance -= qtyInt * price;
-    }
+    // 페이퍼 모드: 잔고 차감 (국내·미국 모두 원화)
+    STATE.paperBalance -= Math.round(investAmt);
   }
 
   const pos = {
