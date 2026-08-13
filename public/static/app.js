@@ -137,10 +137,42 @@ window.addEventListener('DOMContentLoaded', async () => {
 function openApiSettings()  { document.getElementById('api-modal').classList.remove('hidden'); }
 function closeApiSettings() { document.getElementById('api-modal').classList.add('hidden'); }
 
+/** 통합증거금 원화 잔고 수동 적용 */
+function applyManualKrwBalance() {
+  const raw = parseInt(document.getElementById('input-krw-balance').value || '0');
+  if (isNaN(raw) || raw < 0) {
+    alert('올바른 금액을 입력하세요 (0 이상의 정수)');
+    return;
+  }
+  STATE.liveBalanceKrwForUs = raw;
+  STATE.liveBalanceUsdTs = Date.now(); // "미조회 상태" 탈출
+  localStorage.setItem('manual_krw_balance', String(raw));
+  const disp = document.getElementById('krw-balance-display');
+  if (raw > 0) {
+    disp.textContent = `✅ 적용됨: ${fmtPrice(raw)}원 — 미국주식 매수 가능`;
+    disp.classList.remove('hidden');
+    addLog('info', `💴 통합증거금 원화 잔고 수동 설정: ${fmtPrice(raw)}원 (미국주식 매수 가능)`);
+  } else {
+    disp.textContent = '수동 잔고 초기화됨';
+    disp.classList.remove('hidden');
+    addLog('info', '💴 통합증거금 수동 잔고 초기화');
+  }
+  updateStatsUI();
+}
+
 function loadSavedKeys() {
   document.getElementById('input-app-key').value    = KEYS.appKey    ? '●●●●●●●●' : '';
   document.getElementById('input-app-secret').value = KEYS.appSecret ? '●●●●●●●●' : '';
   document.getElementById('input-account-no').value = KEYS.accountNo || '';
+  // 수동 입력 원화 잔고 복원
+  const savedKrw = parseInt(localStorage.getItem('manual_krw_balance') || '0');
+  if (savedKrw > 0) {
+    document.getElementById('input-krw-balance').value = savedKrw;
+    STATE.liveBalanceKrwForUs = savedKrw;
+    const disp = document.getElementById('krw-balance-display');
+    disp.textContent = `✅ 적용됨: ${fmtPrice(savedKrw)}원`;
+    disp.classList.remove('hidden');
+  }
 }
 
 function saveApiKeys() {
@@ -1639,8 +1671,20 @@ async function generateUsCandidates() {
         STATE.liveBalanceUsdFetching = false;
         if (bal.cashKrw > 0) {
           STATE.liveBalanceKrwForUs = bal.cashKrw;
+          addLog('info', `💴 통합증거금 원화 잔고 수신: ${fmtPrice(bal.cashKrw)}원`);
+        } else {
+          // cashKrw=0: 서버 응답은 왔지만 원화 가용금액 0 (또는 필드 없음)
+          // 수동 입력값이 있으면 유지
+          addLog('info', `💵 미국 달러 잔고: $${bal.cashUsd.toFixed(2)} | 통합증거금 원화: ${bal.cashKrw ?? 'N/A'}원`);
+          if (STATE.liveBalanceKrwForUs > 0) {
+            addLog('info', `💴 수동 설정 원화 잔고 유지: ${fmtPrice(STATE.liveBalanceKrwForUs)}원`);
+          }
         }
         updateStatsUI();
+      } else if (!data.balance) {
+        // 잔고 조회 실패(서버 차단 등) → ts는 갱신, 수동 입력값 유지
+        STATE.liveBalanceUsdTs = Date.now();
+        addLog('warn', `⚠️ 미국주식 잔고 서버 조회 실패 — 수동 입력 잔고 사용 (${fmtPrice(STATE.liveBalanceKrwForUs)}원)`);
       }
       const rawResults = data.results || [];
       // US_STOCKS 메타(name) 병합

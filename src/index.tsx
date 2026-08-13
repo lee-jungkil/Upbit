@@ -427,9 +427,24 @@ app.post('/api/kis/us/prices', async (c) => {
       if (balData.rt_cd === '0') {
         const out2 = balData.output2?.[0] || {}
         const out3 = balData.output3 || {}
+        // 달러 현금: 여러 필드명 시도 (계좌 종류에 따라 다름)
+        const cashUsd = parseFloat(
+          out2.frcr_dncl_amt_2 || out2.frcr_evlu_amt || out2.ovrs_cblc_amt ||
+          out3.frcr_dncl_amt_2 || '0'
+        )
+        // 통합증거금 원화: 가능한 모든 필드명 시도
+        const cashKrw = parseFloat(
+          out3.wdrw_psbl_tot_amt ||   // 출금가능 총금액
+          out3.tot_dncl_amt ||         // 총 예수금
+          out3.nass_amt ||             // 순자산금액
+          out2.evlu_pfls_amt ||        // 통합증거금 관련
+          out3.frcr_buy_amt_smtl1 ||  // 해외주식 매수가능금액(원화) — 일부 계좌
+          out3.frcr_use_psbl_amt ||   // 외화사용가능금액
+          '0'
+        )
         balance = {
-          cashUsd: parseFloat(out2.frcr_dncl_amt_2 || out2.frcr_evlu_amt || out2.ovrs_cblc_amt || '0'),
-          cashKrw: parseFloat(out3.wdrw_psbl_tot_amt || out3.tot_dncl_amt || '0'),
+          cashUsd,
+          cashKrw,
           totalUsd: parseFloat(out3.frcr_evlu_tota || out2.tot_evlu_amt || '0'),
         }
       } else {
@@ -484,10 +499,16 @@ app.post('/api/kis/us/balance', async (c) => {
     // output2[0]: 달러 잔고 필드 (여러 필드명 시도)
     const out2 = data.output2?.[0] || {}
     const out3 = data.output3 || {}
-    const cashUsd = parseFloat(out2.frcr_dncl_amt_2 || out2.frcr_evlu_amt || out2.ovrs_cblc_amt || '0')
-    // 통합증거금 계좌: 원화로 해외주식 매수 가능 — output3.wdrw_psbl_tot_amt (원화 출금가능 총금액)
-    // 달러 잔고($0)여도 원화 잔고가 있으면 매수 가능
-    const cashKrw = parseFloat(out3.wdrw_psbl_tot_amt || out3.tot_dncl_amt || '0')
+    const cashUsd = parseFloat(out2.frcr_dncl_amt_2 || out2.frcr_evlu_amt || out2.ovrs_cblc_amt || out3.frcr_dncl_amt_2 || '0')
+    // 통합증거금 계좌: 원화로 해외주식 매수 가능 — 가능한 모든 필드명 시도
+    const cashKrw = parseFloat(
+      out3.wdrw_psbl_tot_amt ||   // 출금가능 총금액
+      out3.tot_dncl_amt ||         // 총 예수금
+      out3.nass_amt ||             // 순자산금액
+      out3.frcr_buy_amt_smtl1 ||  // 해외주식 매수가능금액(원화)
+      out3.frcr_use_psbl_amt ||   // 외화사용가능금액
+      '0'
+    )
     return c.json({ ok: true, cashUsd, cashKrw, totalUsd: parseFloat(out3.frcr_evlu_tota || out2.tot_evlu_amt || '0') })
   }
 
@@ -1182,6 +1203,21 @@ app.get('/', (c) => {
         <label class="text-xs text-gray-400 mb-1 block">계좌번호 (실전 모드)</label>
         <input id="input-account-no" type="text" placeholder="예: 50012345-01"
           class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+      </div>
+      <div class="border-t border-gray-700 pt-3">
+        <label class="text-xs text-gray-300 mb-1 block font-semibold">
+          <i class="fas fa-won-sign text-yellow-400 mr-1"></i> 통합증거금 원화 가용잔고 (수동 입력)
+        </label>
+        <div class="flex gap-2 items-center">
+          <input id="input-krw-balance" type="number" placeholder="예: 10000000 (1000만원)"
+            class="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-yellow-500"
+            min="0" step="100000">
+          <button onclick="applyManualKrwBalance()" class="px-3 py-2 bg-yellow-600 hover:bg-yellow-500 rounded text-sm whitespace-nowrap transition">
+            적용
+          </button>
+        </div>
+        <p class="text-xs text-gray-500 mt-1">달러 잔고($0)여도 원화로 미국주식 매수가 가능한 통합증거금 계좌입니다.<br>KIS HTS에서 확인한 <strong class="text-gray-400">해외주식 가능금액(원화)</strong>을 입력하세요.</p>
+        <div id="krw-balance-display" class="text-xs text-yellow-400 mt-1 hidden"></div>
       </div>
     </div>
 
