@@ -357,6 +357,59 @@ app.post('/api/kis/us/price', async (c) => {
   }
 })
 
+// ── KIS 프록시: 미국주식 복수종목 배치 현재가 조회 (토큰 1회 발급 후 순차 처리)
+// CF Workers 다중 인스턴스 문제 해결 — 같은 Worker 인스턴스에서 토큰 1회만 발급
+app.post('/api/kis/us/prices', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as any
+  const { appKey, appSecret, symbols } = body
+  // symbols: [{ ticker: 'AAPL', excd: 'NAS' }, ...]
+  if (!appKey || !appSecret || !Array.isArray(symbols) || symbols.length === 0) {
+    return c.json({ error: 'appKey, appSecret, symbols[] 필수' }, 400)
+  }
+  // ── 토큰 1회만 발급 (같은 인스턴스에서 처리 — 다중 발급 방지)
+  const { token, error, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret)
+  if (!token) {
+    return c.json({ error: error || '토큰 실패', serverBlocked: !!networkError }, networkError ? 503 : 401)
+  }
+  const results: Array<{
+    ticker: string; excd: string; price: number;
+    change: number; changeRate: number; volume: number;
+    high: number; low: number;
+  }> = []
+  // ── 순차 처리: 같은 토큰으로 모든 종목 조회 (동시 발급 없음)
+  for (const s of symbols) {
+    try {
+      const exchCd = (s.excd || 'NAS').toUpperCase()
+      const url = `https://openapi.koreainvestment.com:9443/uapi/overseas-price/v1/quotations/price?AUTH=&EXCD=${exchCd}&SYMB=${s.ticker}`
+      const res = await fetch(url, {
+        headers: {
+          authorization: `Bearer ${token}`,
+          appkey: appKey, appsecret: appSecret,
+          tr_id: 'HHDFS00000300', custtype: 'P',
+        },
+        // @ts-ignore
+        signal: AbortSignal.timeout(8000),
+      })
+      const data: any = await res.json()
+      if (data.rt_cd === '0') {
+        const out = data.output || {}
+        results.push({
+          ticker:     s.ticker,
+          excd:       s.excd || 'NAS',
+          price:      parseFloat(out.last || '0'),
+          change:     parseFloat(out.diff || '0'),
+          changeRate: parseFloat(out.rate || '0'),
+          volume:     parseInt(out.tvol || '0'),
+          high:       parseFloat(out.high || '0'),
+          low:        parseFloat(out.low  || '0'),
+        })
+      }
+      // 실패 시 조용히 스킵 (results에 포함 안 함)
+    } catch { /* 개별 종목 타임아웃·오류 시 스킵 */ }
+  }
+  return c.json({ ok: true, results })
+})
+
 // ── KIS 프록시: 미국주식 잔고 조회
 app.post('/api/kis/us/balance', async (c) => {
   const body = await c.req.json().catch(() => ({})) as any

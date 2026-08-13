@@ -1594,31 +1594,31 @@ async function generateUsCandidates() {
     { ticker: 'COIN',  name: 'Coinbase',      excd: 'NAS' },
   ];
 
-  // 실전 모드: KIS API로 전체 종목 현재가 병렬 조회 (국내주식과 동일한 방식)
+  // 실전 모드: KIS API 배치 엔드포인트로 1회 요청 (토큰 1회 발급 — 다중 발급 방지)
   if (STATE.mode === 'live' && KEYS.appKey) {
     try {
-      // 전체 20개 병렬 조회 (셔플 없이 — 국내주식 거래량순위와 동일 구조)
-      const results = await Promise.all(US_STOCKS.map(async (s) => {
-        try {
-          const res = await fetch('/api/kis/us/price', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              appKey: KEYS.appKey, appSecret: KEYS.appSecret,
-              symbol: s.ticker, excd: s.excd,
-            }),
-            signal: AbortSignal.timeout(8000),
-          });
-          const data = await res.json();
-          if (data.ok && data.price > 0) {
-            return { ...s, price: data.price, pctChange: data.changeRate ?? 0, volume: data.volume ?? 0 };
-          }
-          // 개별 실패 시 조용히 null 반환
-          return null;
-        } catch { return null; }
-      }));
-
-      const valid = results.filter(Boolean);
+      // 20개 종목을 서버 1회 요청으로 처리 — CF Workers 다중 인스턴스 토큰 과다발급 방지
+      const res = await fetch('/api/kis/us/prices', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          appKey: KEYS.appKey, appSecret: KEYS.appSecret,
+          symbols: US_STOCKS.map(s => ({ ticker: s.ticker, excd: s.excd })),
+        }),
+        signal: AbortSignal.timeout(60000), // 순차 처리이므로 여유 있게 60초
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        addLog('warn', `⚠️ 미국주식 시세 배치 조회 실패 — ${data.error || res.status}`);
+        return generateUsSimCandidates(strategy, ap);
+      }
+      const rawResults = data.results || [];
+      // US_STOCKS 메타(name) 병합
+      const tickerMeta = {};
+      US_STOCKS.forEach(s => { tickerMeta[s.ticker] = s; });
+      const valid = rawResults
+        .filter(r => r.price > 0)
+        .map(r => ({ ...tickerMeta[r.ticker], price: r.price, pctChange: r.changeRate ?? 0, volume: r.volume ?? 0 }));
       addLog('scan', `   🇺🇸 미국주식 시세 조회: ${valid.length}/${US_STOCKS.length}개 성공`);
 
       if (valid.length > 0) {
