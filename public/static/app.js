@@ -1712,12 +1712,40 @@ async function executeEntry(candidate) {
     }
     available = isUs ? (STATE.paperBalanceUsd * STATE.usdKrw) : STATE.paperBalance;
   } else {
+    // ── 실전 모드: tickPositions가 30초마다 캐시 갱신 중 → 캐시값 우선 사용
+    // executeEntry에서 직접 KIS 호출 금지 (토큰 1분 발급 한도 초과 방지)
     if (isUs) {
-      available = (await getUsLiveBalance()) * STATE.usdKrw; // 달러→원화 환산 비교용
-      if (available > 0) { STATE.liveBalanceUsd = available / STATE.usdKrw; STATE.liveBalanceUsdTs = Date.now(); }
+      const cachedUsd = STATE.liveBalanceUsd;
+      const cacheAge  = Date.now() - STATE.liveBalanceUsdTs;
+      if (cachedUsd > 0 && cacheAge < 120000) {
+        // 캐시 신선 (2분 이내) → 캐시 그대로 사용
+        available = cachedUsd * STATE.usdKrw;
+      } else {
+        // 캐시 없거나 오래됨 → 1회 조회 시도, 실패 시 이전 캐시 폴백
+        try {
+          const freshUsd = await getUsLiveBalance();
+          available = freshUsd * STATE.usdKrw;
+          if (freshUsd > 0) { STATE.liveBalanceUsd = freshUsd; STATE.liveBalanceUsdTs = Date.now(); }
+          else if (cachedUsd > 0) available = cachedUsd * STATE.usdKrw; // 폴백
+        } catch {
+          available = cachedUsd > 0 ? cachedUsd * STATE.usdKrw : 0;
+        }
+      }
     } else {
-      available = await getLiveBalance();
-      if (available > 0) { STATE.liveBalance = available; STATE.liveBalanceTs = Date.now(); }
+      const cachedKrw = STATE.liveBalance;
+      const cacheAge  = Date.now() - STATE.liveBalanceTs;
+      if (cachedKrw > 0 && cacheAge < 120000) {
+        available = cachedKrw;
+      } else {
+        try {
+          const freshKrw = await getLiveBalance();
+          available = freshKrw;
+          if (freshKrw > 0) { STATE.liveBalance = freshKrw; STATE.liveBalanceTs = Date.now(); }
+          else if (cachedKrw > 0) available = cachedKrw; // 폴백
+        } catch {
+          available = cachedKrw > 0 ? cachedKrw : 0;
+        }
+      }
     }
   }
   if (available < 10000) {
