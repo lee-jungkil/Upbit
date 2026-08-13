@@ -266,7 +266,18 @@ app.post('/api/kis/balance', async (c) => {
           : `KIS 응답코드 ${rtCd}`
       return c.json({ error: errMsg, rtCd, serverBlocked: false, hint }, 400)
     }
-    const balance = parseFloat(data?.output2?.[0]?.dnca_tot_amt || '0')
+    const out2kr = data?.output2?.[0] || {}
+    // ord_psbl_cash: 주문가능현금 (주식 매수 후 차감된 실제 가용현금)
+    // dnca_tot_amt:  예수금총액 (매수 전 전체, 이중계산 주의)
+    // 우선순위: 주문가능현금 → 예수금총액 순으로 폴백
+    const balance = parseFloat(
+      out2kr.ord_psbl_cash ||   // 주문가능현금 ← 주식 매수 후 실제 차감됨
+      out2kr.prvs_rcdv_amt  ||  // 가수도금액 (D+2 결제 기준)
+      out2kr.dnca_tot_amt   ||  // 예수금총액 (폴백)
+      '0'
+    )
+    // 순자산 (현금 + 주식평가금 합산) → 총자산 표시용
+    const totalAssetKr = parseFloat(out2kr.tot_evlu_amt || out2kr.nass_amt || '0')
     // output1: 보유 종목 목록 (국내주식)
     const holdings = (data?.output1 || []).map((item: any) => ({
       ticker:     item.pdno,           // 종목코드 (6자리)
@@ -278,7 +289,7 @@ app.post('/api/kis/balance', async (c) => {
       pnlPct:     parseFloat(item.evlu_pfls_rt || '0'),      // 평가손익율
       market:     'KR',
     })).filter((h: any) => h.qty > 0)
-    return c.json({ ok: true, balance, holdings })
+    return c.json({ ok: true, balance, totalAsset: totalAssetKr, holdings })
   }
 
   try {
@@ -1333,7 +1344,7 @@ app.get('/', (c) => {
   </div>
 </div>
 
-<script src="/static/app.1786643095.js"></script>
+<script src="/static/app.1786644026.js"></script>
 </body>
 </html>`)
 })
