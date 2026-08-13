@@ -267,7 +267,18 @@ app.post('/api/kis/balance', async (c) => {
       return c.json({ error: errMsg, rtCd, serverBlocked: false, hint }, 400)
     }
     const balance = parseFloat(data?.output2?.[0]?.dnca_tot_amt || '0')
-    return c.json({ ok: true, balance })
+    // output1: 보유 종목 목록 (국내주식)
+    const holdings = (data?.output1 || []).map((item: any) => ({
+      ticker:     item.pdno,           // 종목코드 (6자리)
+      name:       item.prdt_name,      // 종목명
+      qty:        parseFloat(item.hldg_qty || '0'),          // 보유수량
+      avgPrice:   parseFloat(item.pchs_avg_pric || '0'),     // 평균매수가
+      currentPrice: parseFloat(item.prpr || '0'),            // 현재가
+      evalAmt:    parseFloat(item.evlu_amt || '0'),          // 평가금액
+      pnlPct:     parseFloat(item.evlu_pfls_rt || '0'),      // 평가손익율
+      market:     'KR',
+    })).filter((h: any) => h.qty > 0)
+    return c.json({ ok: true, balance, holdings })
   }
 
   try {
@@ -540,7 +551,19 @@ app.post('/api/kis/us/balance', async (c) => {
       out3.frcr_use_psbl_amt ||   // 외화사용가능금액
       '0'
     )
-    return c.json({ ok: true, cashUsd, cashKrw, totalUsd: parseFloat(out3.frcr_evlu_tota || out2.tot_evlu_amt || '0') })
+    // output1: 보유 종목 목록 (미국주식)
+    const holdingsUs = (data?.output1 || []).map((item: any) => ({
+      ticker:       item.ovrs_pdno,           // 종목코드 (예: AAPL)
+      name:         item.ovrs_item_name,       // 종목명
+      qty:          parseFloat(item.ovrs_cblc_qty || item.hldg_qty || '0'),     // 보유수량
+      avgPrice:     parseFloat(item.pchs_avg_pric || '0'),                       // 평균매수가(달러)
+      currentPrice: parseFloat(item.now_pric2 || item.ovrs_stck_evlu_amt || '0'), // 현재가(달러)
+      evalAmt:      parseFloat(item.ovrs_stck_evlu_amt || '0'),                  // 평가금액(달러)
+      pnlPct:       parseFloat(item.evlu_pfls_rt || '0'),                        // 평가손익율
+      excd:         item.ovrs_excg_cd || '',   // 거래소코드 (NASD/NYSE)
+      market:       'US',
+    })).filter((h: any) => h.qty > 0)
+    return c.json({ ok: true, cashUsd, cashKrw, totalUsd: parseFloat(out3.frcr_evlu_tota || out2.tot_evlu_amt || '0'), holdings: holdingsUs })
   }
 
   try {
@@ -1309,7 +1332,7 @@ app.get('/', (c) => {
   </div>
 </div>
 
-<script src="/static/app.1786641209.js"></script>
+<script src="/static/app.1786642216.js"></script>
 </body>
 </html>`)
 })
