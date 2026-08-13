@@ -2413,12 +2413,13 @@ function updateStatsUI() {
     const stockValUsdKrw = Math.round(stockValUsd * STATE.usdKrw);
 
     // ── 총자산 계산 ──
-    // 통합증거금: 달러 잔고=0이어도 원화 잔고로 해외주식 매수 가능
-    const cashKrwForUs = STATE.liveBalanceKrwForUs;
+    // 통합증거금: 달러 잔고 필요 없음 — 원화(cash)로 미국주식 직접 매수
+    // liveBalanceKrwForUs는 liveBalance와 동기화되므로 US 모드도 cash 그대로 사용
+    const cashKrwForUs = STATE.liveBalanceKrwForUs > 0 ? STATE.liveBalanceKrwForUs : cash;
     let totalAsset = 0;
     if (mkt === 'KR')        totalAsset = cash + stockValKr;
-    else if (mkt === 'US')   totalAsset = Math.round(cashUsd * STATE.usdKrw) + stockValUsdKrw + (cashUsd === 0 ? cashKrwForUs : 0);
-    else                     totalAsset = cash + stockValKr + Math.round(cashUsd * STATE.usdKrw) + stockValUsdKrw;
+    else if (mkt === 'US')   totalAsset = cashKrwForUs + stockValUsdKrw;
+    else                     totalAsset = cash + stockValKr + stockValUsdKrw;
 
     const hasCash   = cash > 0 || cashUsd > 0 || cashKrwForUs > 0;
     const hasStock  = stockValKr > 0 || stockValUsd > 0;
@@ -2456,29 +2457,24 @@ function updateStatsUI() {
     // 현금 잔고 표시
     const cashEl = document.getElementById('stat-cash');
     if (mkt === 'US') {
-      // 미국 모드: 달러 잔고 + 통합증거금 원화 표시
-      if (fetchingUsd && cashUsd === 0 && cashKrwForUs === 0) {
+      // 미국 모드: 통합증거금 — 원화 잔고만 표시 (달러 불필요)
+      if (fetching && cashKrwForUs === 0 && !hasQueried) {
         cashEl.textContent = '조회 중…';
-      } else if (cashUsd > 0) {
-        cashEl.textContent = `$${cashUsd.toFixed(2)} (≈${fmtPrice(Math.round(cashUsd * STATE.usdKrw))}원)`;
       } else if (cashKrwForUs > 0) {
-        // 통합증거금: 달러=0이지만 원화로 매수 가능
         cashEl.textContent = `${fmtPrice(cashKrwForUs)}원 (통합증거금)`;
       } else if (hasQueried) {
-        cashEl.textContent = '$0.00 (잔고 없음)';
+        cashEl.textContent = '0원 (잔고 없음 — ✏️ 입력 필요)';
       } else {
         cashEl.textContent = hasApiKey ? '조회 중…' : '미연결';
       }
     } else if (mkt === 'BOTH') {
-      // BOTH 모드: 원화 + 달러 합산
-      const krPart = cash > 0 ? fmtPrice(cash) + '원' : '';
-      const usPart = cashUsd > 0 ? `$${cashUsd.toFixed(0)}` : (cashKrwForUs > 0 ? `${fmtPrice(cashKrwForUs)}원(통합증거금)` : '');
-      if ((fetching || fetchingUsd) && cash === 0 && cashUsd === 0 && cashKrwForUs === 0 && !hasQueried) {
+      // BOTH 모드: 원화 잔고로 국내+미국 모두 커버 (통합증거금)
+      if (fetching && cash === 0 && !hasQueried) {
         cashEl.textContent = '조회 중…';
-      } else if (krPart || usPart) {
-        cashEl.textContent = [krPart, usPart].filter(Boolean).join(' / ');
+      } else if (cash > 0) {
+        cashEl.textContent = `${fmtPrice(cash)}원 (통합증거금)`;
       } else if (hasQueried) {
-        cashEl.textContent = '0원 / $0 (잔고 없음)';
+        cashEl.textContent = '0원 (잔고 없음 — ✏️ 입력 필요)';
       } else {
         cashEl.textContent = hasApiKey ? '조회 중…' : '미연결';
       }
@@ -2489,7 +2485,7 @@ function updateStatsUI() {
       } else if (cash > 0) {
         cashEl.textContent = fmtPrice(cash) + '원';
       } else if (hasQueried) {
-        cashEl.textContent = '0원 (잔고 없음)';
+        cashEl.textContent = '0원 (잔고 없음 — ✏️ 입력 필요)';
       } else {
         cashEl.textContent = hasApiKey ? '조회 중…' : '미연결';
       }
