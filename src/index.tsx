@@ -533,7 +533,11 @@ app.post('/api/kis/us/order', async (c) => {
   }
   try {
     const [cano, acntPrdtCd] = accountNo.split('-')
-    const exchCd = (excd || 'NASD').toUpperCase()
+    // NAS→NASD, NYS→NYSE 정규화 (이미 4글자인 NASD/NYSE도 안전하게 처리)
+    const rawCd = (excd || 'NASD').toUpperCase()
+    const exchCd = (rawCd === 'NAS' || rawCd === 'NASD') ? 'NASD'
+                 : (rawCd === 'NYS' || rawCd === 'NYSE') ? 'NYSE'
+                 : rawCd
 
     // ── tr_id: 시간대(주간/야간) × 거래소(NASD/NYSE) × 매수/매도 자동 선택 ──
     // 한국시간 기준: 22:30~06:00 = 야간장, 그 외 = 주간장
@@ -1261,7 +1265,7 @@ app.get('/', (c) => {
   </div>
 </div>
 
-<script src="/static/app.1786637256.js"></script>
+<script src="/static/app.1786638661.js"></script>
 </body>
 </html>`)
 })
