@@ -361,10 +361,12 @@ app.post('/api/kis/us/price', async (c) => {
 // CF Workers 다중 인스턴스 문제 해결 — 같은 Worker 인스턴스에서 토큰 1회만 발급
 app.post('/api/kis/us/prices', async (c) => {
   const body = await c.req.json().catch(() => ({})) as any
-  const { appKey, appSecret, symbols, accountNo } = body
-  // symbols: [{ ticker: 'AAPL', excd: 'NAS' }, ...]
+  const { appKey, appSecret, accountNo } = body
+  // symbols: [{ ticker: 'AAPL', excd: 'NAS' }, ...] — 최대 10개로 제한 (KIS 초당 1회 rate limit)
+  const symbolsRaw: Array<{ticker:string; excd:string}> = Array.isArray(body.symbols) ? body.symbols : []
+  const symbols = symbolsRaw.slice(0, 10)  // 최대 10개 — 10초 이내 완료
   // accountNo: 선택 — 전달 시 잔고도 함께 조회 (토큰 1회 공유)
-  if (!appKey || !appSecret || !Array.isArray(symbols) || symbols.length === 0) {
+  if (!appKey || !appSecret || symbols.length === 0) {
     return c.json({ error: 'appKey, appSecret, symbols[] 필수' }, 400)
   }
   // ── 토큰 1회만 발급 — 시세 + 잔고 모두 이 토큰으로 처리
@@ -377,8 +379,12 @@ app.post('/api/kis/us/prices', async (c) => {
     change: number; changeRate: number; volume: number;
     high: number; low: number;
   }> = []
-  // ── 순차 처리: 같은 토큰으로 모든 종목 조회 (동시 발급 없음)
-  for (const s of symbols) {
+  // ── 순차 처리: KIS 해외주식 초당 1회 Rate Limit 준수
+  // 종목당 1.1초 딜레이 삽입 (첫 종목은 딜레이 없음)
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+  for (let i = 0; i < symbols.length; i++) {
+    const s = symbols[i]
+    if (i > 0) await sleep(1100)  // 초당 1회 제한 — 1.1초 간격
     try {
       const exchCd = (s.excd || 'NAS').toUpperCase()
       const url = `https://openapi.koreainvestment.com:9443/uapi/overseas-price/v1/quotations/price?AUTH=&EXCD=${exchCd}&SYMB=${s.ticker}`
@@ -539,23 +545,36 @@ app.post('/api/kis/us/order', async (c) => {
                  : (rawCd === 'NYS' || rawCd === 'NYSE') ? 'NYSE'
                  : rawCd
 
-    // ── tr_id: 시간대(주간/야간) × 거래소(NASD/NYSE) × 매수/매도 자동 선택 ──
-    // 한국시간 기준: 22:30~06:00 = 야간장, 그 외 = 주간장
+    // ── tr_id: 시간대 × 거래소 × 매수/매도 자동 선택 ──
+    // 한국투자증권 미국주식 거래 시간대 (한국시간 기준, 서머타임 무시 — 넉넉히 구분):
+    //   프리마켓(야간장) : 18:00 ~ 23:29  → TTTS0308U(NASD매수) / TTTS0305U(NYSE매수) 등
+    //   정규장           : 23:30 ~ 06:00  → JTTT1002U(매수) / JTTT1006U(매도) — 거래소 무관
+    //   주간거래(장전)    : 10:00 ~ 17:59  → JTTT1002U(매수) / JTTT1006U(매도)
+    //
+    // ※ 서머타임 적용 시 정규장이 22:30부터 시작하지만, KIS는 23:30을 기준으로 API tr_id를
+    //   구분하므로 서버에서는 23:30 고정 기준으로 처리.
+    //   서머타임 대응은 향후 개선 가능 (현재 한국 겨울 기준으로 동작)
     const nowKst = new Date(Date.now() + 9 * 3600 * 1000)
     const hhmm = nowKst.getUTCHours() * 100 + nowKst.getUTCMinutes()
-    const isNight = hhmm >= 2230 || hhmm < 600  // 야간: 22:30~06:00
+
+    // 프리마켓(야간장): 18:00~23:29 → TTTS 계열
+    // 정규장 + 주간장:  23:30~06:00 + 10:00~17:59 → JTTT 계열
+    const isPremarket = (hhmm >= 1800 && hhmm < 2330)
 
     let trId: string
-    if (isNight) {
-      // 야간: NASD=TTTS0308U(매수)/TTTS0307U(매도), NYSE=TTTS0305U(매수)/TTTS0304U(매도)
-      if (exchCd === 'NYSE' || exchCd === 'NYS') {
+    if (isPremarket) {
+      // 프리마켓(야간): 거래소별 구분
+      // NASD: 매수=TTTS0308U, 매도=TTTS0307U
+      // NYSE: 매수=TTTS0305U, 매도=TTTS0304U
+      if (exchCd === 'NYSE') {
         trId = side === 'buy' ? 'TTTS0305U' : 'TTTS0304U'
       } else {
         // NASD (나스닥, AMEX 포함)
         trId = side === 'buy' ? 'TTTS0308U' : 'TTTS0307U'
       }
     } else {
-      // 주간(한국 10:00~18:00 미국 주간거래): 매수=JTTT1002U, 매도=JTTT1006U (거래소 무관)
+      // 정규장(23:30~06:00) + 주간거래(10:00~17:59): 거래소 무관
+      // 매수=JTTT1002U, 매도=JTTT1006U
       trId = side === 'buy' ? 'JTTT1002U' : 'JTTT1006U'
     }
 
@@ -580,8 +599,8 @@ app.post('/api/kis/us/order', async (c) => {
       signal: AbortSignal.timeout(8000),
     })
     const data: any = await res.json()
-    if (data.rt_cd !== '0') return c.json({ error: data.msg1 || JSON.stringify(data), trId, exchCd }, 400)
-    return c.json({ ok: true, ordNo: data.output?.odno, trId })
+    if (data.rt_cd !== '0') return c.json({ error: data.msg1 || JSON.stringify(data), trId, exchCd, hhmm, isPremarket }, 400)
+    return c.json({ ok: true, ordNo: data.output?.odno, trId, exchCd })
   } catch (e: any) {
     return c.json({ error: e?.message || '미국주식 주문 실패', serverBlocked: true }, 503)
   }
@@ -1265,7 +1284,7 @@ app.get('/', (c) => {
   </div>
 </div>
 
-<script src="/static/app.1786638661.js"></script>
+<script src="/static/app.1786639170.js"></script>
 </body>
 </html>`)
 })
