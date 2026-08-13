@@ -285,33 +285,58 @@ app.post('/api/kis/order', async (c) => {
   if (!appKey || !appSecret || !accountNo || !ticker || !side || !qty) {
     return c.json({ error: 'appKey, appSecret, accountNo, ticker, side, qty 필수' }, 400)
   }
-  const { token, error } = await getKisToken({ ...c.env } as any, appKey, appSecret)
-  if (!token) return c.json({ error: error || '토큰 발급 실패', serverBlocked: true }, 503)
 
-  try {
-    const [cano, acntPrdtCd] = accountNo.split('-')
-    const trId = side === 'buy' ? 'TTTC0802U' : 'TTTC0801U'
-    const res = await fetch('https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/trading/order-cash', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        authorization: `Bearer ${token}`,
-        appkey: appKey, appsecret: appSecret,
-        tr_id: trId, custtype: 'P',
-      },
-      body: JSON.stringify({
-        CANO: cano, ACNT_PRDT_CD: acntPrdtCd,
-        PDNO: ticker, ORD_DVSN: '01', ORD_QTY: String(qty), ORD_UNPR: '0',
-      }),
-      // @ts-ignore
-      signal: AbortSignal.timeout(8000),
-    })
-    const data: any = await res.json()
-    if (data.rt_cd !== '0') return c.json({ error: data.msg1 || JSON.stringify(data) }, 400)
-    return c.json({ ok: true, ordNo: data.output?.odno })
-  } catch (e: any) {
-    return c.json({ error: e?.message || '주문 실패', serverBlocked: true }, 503)
+  // 토큰 취득 + rt_cd='1' 만료 시 1회 자동 재발급 (잔고조회와 동일한 패턴)
+  async function doOrder(retrying = false): Promise<Response> {
+    const { token, error: tokErr } = await getKisToken({ ...c.env } as any, appKey, appSecret)
+    if (!token) return c.json({ error: tokErr || '토큰 발급 실패', serverBlocked: true }, 503)
+
+    try {
+      const [cano, acntPrdtCd] = accountNo.split('-')
+      const trId = side === 'buy' ? 'TTTC0802U' : 'TTTC0801U'
+      const res = await fetch('https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/trading/order-cash', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          authorization: `Bearer ${token}`,
+          appkey: appKey, appsecret: appSecret,
+          tr_id: trId, custtype: 'P',
+        },
+        body: JSON.stringify({
+          CANO: cano, ACNT_PRDT_CD: acntPrdtCd,
+          PDNO: ticker, ORD_DVSN: '01', ORD_QTY: String(qty), ORD_UNPR: '0',
+        }),
+        // @ts-ignore
+        signal: AbortSignal.timeout(8000),
+      })
+      const data: any = await res.json()
+      if (data.rt_cd !== '0') {
+        // rt_cd='1': 토큰 만료 → 캐시 무효화 후 1회 재시도
+        if (data.rt_cd === '1' && !retrying) {
+          invalidateKisToken(appKey)
+          if (c.env.KV) await c.env.KV.delete('kis_token_' + appKey.slice(-8)).catch(() => {})
+          return doOrder(true)
+        }
+        const errMsg = data.msg1 || data.msg2 || JSON.stringify(data).slice(0, 200)
+        const rtCd   = data.rt_cd || 'unknown'
+        const hint   = rtCd === '1'
+          ? '토큰 만료 — 재발급 실패. 잠시 후 재시도'
+          : errMsg.includes('ACNO') || errMsg.includes('계좌')
+            ? '계좌번호 불일치 — KIS 개발자센터에서 APP KEY와 연결된 계좌번호를 확인하세요'
+            : errMsg.includes('잔고') || errMsg.includes('부족') || errMsg.includes('LIMIT')
+              ? '매수 가능 금액 부족 — 잔고를 확인하세요'
+              : `KIS 응답코드 ${rtCd}`
+        return c.json({ error: errMsg, rtCd, hint, trId, ticker }, 400)
+      }
+      return c.json({ ok: true, ordNo: data.output?.odno, trId })
+    } catch (e: any) {
+      const msg = e?.message || '주문 실패'
+      const isNetwork = msg.includes('fetch') || msg.includes('connect') || msg.includes('timeout') || msg.includes('network')
+      return c.json({ error: msg, serverBlocked: isNetwork }, isNetwork ? 503 : 500)
+    }
   }
+
+  return doOrder()
 })
 
 // ── KIS 프록시: 미국주식 현재가 (서버→KIS HHDFS00000300)
@@ -1284,7 +1309,7 @@ app.get('/', (c) => {
   </div>
 </div>
 
-<script src="/static/app.1786639571.js"></script>
+<script src="/static/app.1786640033.js"></script>
 </body>
 </html>`)
 })
