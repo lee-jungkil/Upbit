@@ -741,7 +741,7 @@ app.get('/', (c) => {
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/axios@1.6.0/dist/axios.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=25">
+  <link rel="stylesheet" href="/static/style.css?v=26">
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen">
 
@@ -781,6 +781,15 @@ app.get('/', (c) => {
       <div class="mt-2 flex items-center justify-between text-xs">
         <span class="text-gray-500">현금</span>
         <span id="stat-cash" class="text-blue-400 font-medium">-</span>
+        <button onclick="openBalanceInput()" title="원화 잔고 직접 입력" class="ml-1 text-gray-600 hover:text-yellow-400 transition" style="font-size:10px">✏️</button>
+      </div>
+      <!-- 잔고 직접 입력 행 (서버 차단 시 표시) -->
+      <div id="manual-balance-row" class="hidden mt-1 flex items-center gap-1">
+        <input id="manual-balance-input" type="number" placeholder="원화 잔고 입력" min="0" step="100000"
+          class="flex-1 bg-gray-800 border border-yellow-600 rounded px-2 py-0.5 text-xs text-white w-0"
+          onkeydown="if(event.key==='Enter') applyManualBalance()">
+        <button onclick="applyManualBalance()" class="px-2 py-0.5 bg-yellow-600 hover:bg-yellow-500 rounded text-xs whitespace-nowrap">적용</button>
+        <button onclick="closeBalanceInput()" class="px-1 py-0.5 text-gray-500 hover:text-white text-xs">✕</button>
       </div>
       <div class="mt-1 flex items-center justify-between text-xs">
         <span class="text-gray-500">주식 평가</span>
@@ -1233,7 +1242,7 @@ app.get('/', (c) => {
   </div>
 </div>
 
-<script src="/static/app.js?v=25"></script>
+<script src="/static/app.js?v=26"></script>
 </body>
 </html>`)
 })

@@ -82,6 +82,16 @@ window.addEventListener('DOMContentLoaded', async () => {
   await loadTradeHistory();
   initProfitChart();
 
+  // ── 수동 입력 원화 잔고 즉시 STATE 복원 (서버 차단 환경 대응) ──
+  const _savedManualBal = parseInt(localStorage.getItem('manual_krw_balance') || '0');
+  if (_savedManualBal > 0) {
+    STATE.liveBalance        = _savedManualBal;
+    STATE.liveBalanceTs      = Date.now();
+    STATE.liveBalanceKrwForUs = _savedManualBal;
+    // 이 시점에서는 로그 패널이 아직 준비됐을 수도 있음 — setTimeout으로 안전하게 출력
+    setTimeout(() => addLog('info', `💰 수동 잔고 복원: ${fmtPrice(_savedManualBal)}원 (통합증거금 — 매수 즉시 사용 가능)`), 200);
+  }
+
   // 저장된 모드 복원 (localStorage에서 읽기)
   const savedMode = localStorage.getItem('bot_mode') || 'paper';
   STATE.mode = savedMode;
@@ -104,13 +114,22 @@ window.addEventListener('DOMContentLoaded', async () => {
     STATE.liveBalanceFetching = true;
     updateStatsUI();
     getLiveBalance().then(bal => {
-      STATE.liveBalance    = bal;
-      STATE.liveBalanceTs  = Date.now();
       STATE.liveBalanceFetching = false;
-      // 통합증거금: 국내 원화 잔고 = 미국주식 가용 원화 (수동 입력이 없을 때만 자동 동기화)
-      if (bal > 0 && STATE.liveBalanceKrwForUs === 0) STATE.liveBalanceKrwForUs = bal;
-      else if (bal > 0) STATE.liveBalanceKrwForUs = bal; // 항상 최신값으로 갱신
-      if (bal > 0) addLog('info', `💰 잔고 복원: ${fmtPrice(bal)}원 (통합증거금 — 미국주식 가용)`);
+      if (bal > 0) {
+        // 실제 잔고 수신 시에만 덮어씀 (0이면 수동 입력값 유지)
+        STATE.liveBalance        = bal;
+        STATE.liveBalanceTs      = Date.now();
+        STATE.liveBalanceKrwForUs = bal;
+        addLog('info', `💰 잔고 복원: ${fmtPrice(bal)}원 (통합증거금 — 미국주식 가용)`);
+      } else {
+        // serverBlocked 등으로 0 반환 → 수동 입력값이 있으면 유지
+        STATE.liveBalanceTs = Date.now();
+        const manual = parseInt(localStorage.getItem('manual_krw_balance') || '0');
+        if (manual > 0 && STATE.liveBalance === 0) {
+          STATE.liveBalance        = manual;
+          STATE.liveBalanceKrwForUs = manual;
+        }
+      }
       updateStatsUI();
     }).catch(() => {
       STATE.liveBalanceFetching = false;
@@ -139,6 +158,30 @@ window.addEventListener('DOMContentLoaded', async () => {
 // ─── API 설정 모달 ────────────────────────────────────────────
 function openApiSettings()  { document.getElementById('api-modal').classList.remove('hidden'); }
 function closeApiSettings() { document.getElementById('api-modal').classList.add('hidden'); }
+
+// ── 원화 잔고 직접 입력 (서버 차단 환경 대응)
+function openBalanceInput() {
+  const row = document.getElementById('manual-balance-row');
+  if (!row) return;
+  const saved = parseInt(localStorage.getItem('manual_krw_balance') || '0');
+  if (saved > 0) document.getElementById('manual-balance-input').value = saved;
+  row.classList.remove('hidden');
+  setTimeout(() => document.getElementById('manual-balance-input')?.focus(), 50);
+}
+function closeBalanceInput() {
+  document.getElementById('manual-balance-row')?.classList.add('hidden');
+}
+function applyManualBalance() {
+  const val = parseInt(document.getElementById('manual-balance-input').value || '0');
+  if (!val || val < 1000) { alert('1,000원 이상의 금액을 입력하세요'); return; }
+  localStorage.setItem('manual_krw_balance', String(val));
+  STATE.liveBalance        = val;
+  STATE.liveBalanceTs      = Date.now();
+  STATE.liveBalanceKrwForUs = val;
+  addLog('info', `💰 원화 잔고 수동 입력: ${fmtPrice(val)}원 — 매수에 즉시 사용됩니다`);
+  closeBalanceInput();
+  updateStatsUI();
+}
 
 /** 통합증거금 원화 잔고 수동 적용 */
 function applyManualKrwBalance() {
@@ -1816,8 +1859,19 @@ async function executeEntry(candidate) {
           STATE.liveBalanceKrwForUs = freshKrw;
           available = freshKrw;
         } else {
-          addLog('warn', '⚠️ 원화 잔고 조회 완료 — 주문 가능 현금 없음 (KIS 앱 확인 권장)');
-          return;
+          // getLiveBalance가 0 반환 (serverBlocked) → manual_krw_balance 최후 확인
+          const manFallback = parseInt(localStorage.getItem('manual_krw_balance') || '0');
+          if (manFallback > 0) {
+            STATE.liveBalance        = manFallback;
+            STATE.liveBalanceTs      = Date.now();
+            STATE.liveBalanceKrwForUs = manFallback;
+            available = manFallback;
+            addLog('info', `💰 수동 입력 잔고 사용: ${fmtPrice(manFallback)}원 (서버 KIS 차단 환경)`);
+          } else {
+            addLog('warn', '⚠️ 원화 잔고 없음 — 총자산 카드의 ✏️ 버튼으로 원화 잔고를 입력하세요');
+            openBalanceInput();
+            return;
+          }
         }
       } catch {
         addLog('warn', '⚠️ 원화 잔고 조회 실패 — 잠시 후 재시도');
@@ -1826,7 +1880,7 @@ async function executeEntry(candidate) {
     }
   }
   if (available < 10000) {
-    addLog('warn', `⚠️ 가용 자금 부족: ${fmtPrice(available)}원 — 계좌 원화 잔고를 확인하세요`);
+    addLog('warn', `⚠️ 가용 자금 부족: ${fmtPrice(available)}원 — 총자산 카드의 ✏️ 버튼으로 잔고를 입력하세요`);
     return;
   }
 
@@ -2045,25 +2099,37 @@ function getUsExchangeCode(symbol) {
 }
 
 async function getLiveBalance() {
-  if (!KEYS.appKey || !KEYS.accountNo) return STATE.liveBalance;
+  if (!KEYS.appKey || !KEYS.accountNo) {
+    // API 키 없으면 수동 입력 잔고 반환
+    return parseInt(localStorage.getItem('manual_krw_balance') || '0');
+  }
+  // 수동 입력 잔고가 있으면 우선 사용 (서버 차단 환경 대응)
+  const manualBal = parseInt(localStorage.getItem('manual_krw_balance') || '0');
   try {
     const res = await fetch('/api/kis/balance', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo }),
+      signal: AbortSignal.timeout(8000),
     });
     const data = await res.json();
     if (data.serverBlocked) {
-      addLog('warn', '⚠️ 서버→KIS 연결 차단 — 잔고 조회 불가');
+      // 서버→KIS 차단 — 수동 잔고 사용
+      if (manualBal > 0) {
+        addLog('info', `💴 서버 KIS 차단 — 수동 입력 잔고 사용: ${fmtPrice(manualBal)}원`);
+        STATE.liveBalanceTs = Date.now();
+        return manualBal;
+      }
+      // 수동 잔고도 없으면 입력 유도
+      addLog('warn', '⚠️ 서버→KIS 연결 차단 — 총자산 카드의 ✏️ 버튼으로 원화 잔고를 입력하세요');
+      openBalanceInput();
       STATE.liveBalanceTs = Date.now();
-      return STATE.liveBalance;
+      return 0;
     }
     if (data.ok && typeof data.balance === 'number') {
-      // ✅ 정상 응답
       return data.balance;
     }
     if (data.error) {
-      // KIS API 레벨 오류 (rt_cd 오류 등) — serverBlocked 아님
       const hint = data.rtCd ? ` [rt_cd=${data.rtCd}]` : '';
       addLog('warn', `⚠️ 잔고 조회 오류${hint}: ${data.error}`);
       if (data.rtCd === '1') {
