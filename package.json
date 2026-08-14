@@ -3,7 +3,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && rm -f dist/_routes.json",
     "preview": "wrangler pages dev",
     "deploy": "npm run build && wrangler pages deploy",
     "cf-typegen": "wrangler types --env-interface CloudflareBindings"
