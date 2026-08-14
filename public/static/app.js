@@ -1413,6 +1413,22 @@ async function checkPositionsForExit() {
 
   for (let i = STATE.positions.length - 1; i >= 0; i--) {
     const pos = STATE.positions[i];
+    const isUs = pos.market === 'US';
+
+    // ⚠️ 미국주식 장외시간 매도 차단
+    // - 미국 정규장: 평일 23:30~06:00 KST (뉴욕 09:30~16:00)
+    // - 장외시간에는 가격 갱신만 하고 매도 판단 스킵
+    if (isUs && STATE.mode === 'live' && !isUsMarketOpen()) {
+      const price = await fetchCurrentPrice(pos.ticker);
+      if (price) {
+        pos.currentPrice = price;
+        pos.pnlPct = ((price - pos.entryPrice) / pos.entryPrice) * 100;
+        if (pos.pnlPct > (pos.peakPnl || 0)) pos.peakPnl = pos.pnlPct;
+      }
+      // 장외시간 로그는 너무 자주 찍히므로 생략 (watchdog 주기마다 출력 방지)
+      continue; // 매도 판단 전체 스킵
+    }
+
     const currentPrice = await fetchCurrentPrice(pos.ticker);
     if (!currentPrice) continue;
 
@@ -2411,9 +2427,15 @@ function renderPositions() {
   }).join('');
 }
 
-function refreshPositions() {
-  tickPositions();
+async function refreshPositions() {
   addLog('info', '🔄 포지션 수동 새로고침');
+  // 실전 모드: KIS 실보유 재조회 → AMD 같은 장외 매도 후 복원에 사용
+  if (STATE.mode === 'live' && KEYS.appKey && KEYS.accountNo) {
+    addLog('info', '   🔄 KIS 실보유 재조회 중...');
+    await syncKisPositions();
+  } else {
+    tickPositions();
+  }
 }
 
 // ─── 포지션 영구 저장/복원 (localStorage) ────────────────────────
