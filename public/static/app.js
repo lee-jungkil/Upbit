@@ -2657,7 +2657,26 @@ async function syncKisPositions() {
       return;
     }
 
-    // ── API 성공 + 보유종목 0개 = 실제로 보유 없음 ───────────────
+    // ── 일부 조회 실패(Rate Limit 등)로 데이터가 불완전하면 초기화 금지 ──
+    // ex) 미국주식 보유 중인데 미국 조회가 Rate Limit으로 스킵된 경우
+    if (tokenRateLimited) {
+      addLog('warn', `⚠️ 일부 조회 실패(Rate Limit) — 불완전한 데이터로 포지션 초기화 방지. 기존 ${STATE.positions.length}개 유지`);
+      if (kisHoldings.length > 0) {
+        // 조회된 종목만 업데이트, 나머지는 기존 유지
+        for (const h of kisHoldings) {
+          const existing = STATE.positions.find(p => p.ticker === h.ticker);
+          if (existing) {
+            existing.qty          = h.qty;
+            existing.currentPrice = h.currentPrice > 0 ? h.currentPrice : existing.currentPrice;
+          }
+        }
+      }
+      renderPositions();
+      updateStatsUI();
+      return;
+    }
+
+    // ── API 성공(전체) + 보유종목 0개 = 실제로 보유 없음 ───────────────
     if (kisHoldings.length === 0) {
       addLog('info', `   ℹ️ KIS 실보유 없음 — 포지션 초기화`);
       STATE.positions = [];
