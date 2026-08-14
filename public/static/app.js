@@ -107,6 +107,7 @@ function apiHeaders() {
 
 // ─── 초기화 ───────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
+  initBotChannel();       // 단일 탭 리더 채널 초기화 (다른 탭/기기 봇 시작 시 이 탭 자동 정지)
   loadSavedKeys();
   loadConfig();           // 저장된 범위 복원 or 기본값 자동 계산 포함
   renderStrategyConditions();
