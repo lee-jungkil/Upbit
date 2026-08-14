@@ -1447,8 +1447,29 @@ async function checkPositionsForExit() {
     let exitType   = null; // 'profit' | 'loss' | 'trail' | 'time'
 
     // ── 1) 손절 ─────────────────────────────────────────────────
-    if (pnlPct <= -stopLoss) {
-      exitReason = `손절 ${pnlPct.toFixed(2)}%`;
+    // 🛡️ 손절 유예: 기존 보유 포지션이 이미 -stopLoss에 근접해 있으면
+    //   0.5%p 추가 여유(effectiveStopLoss)를 줘서 반등 기회 부여
+    //   - 진입 직후 손절: effectiveStopLoss = stopLoss (정상 손절)
+    //   - 이미 -stopLoss×0.8 이상 손실 중: stopLoss+0.5%p 까지 대기
+    //   예) stopLoss=2.0% → -2% 도달 시 유예 발동 → -2.5% 될 때 손절
+    const stopLossBuffer = 0.5; // 유예 여유 폭 (%)
+    const stopLossExtendThreshold = stopLoss * 0.8; // 손절의 80% 이상 손실 시 유예 발동
+    const effectiveStopLoss =
+      (!pos.stopLossExtended && pnlPct <= -stopLossExtendThreshold && pnlPct > -stopLoss)
+        ? (() => { // 유예 발동: 한 번만 로그
+            if (!pos._stopExtendLogged) {
+              pos._stopExtendLogged = true;
+              addLog('warn', `🛡️ 손절 유예: ${pos.name} ${pnlPct.toFixed(2)}% → 스탑 -${(stopLoss + stopLossBuffer).toFixed(1)}%까지 대기`);
+            }
+            pos.stopLossExtended = true;
+            return stopLoss + stopLossBuffer;
+          })()
+        : pos.stopLossExtended
+          ? stopLoss + stopLossBuffer  // 이미 유예 중
+          : stopLoss;                  // 일반 손절
+
+    if (pnlPct <= -effectiveStopLoss) {
+      exitReason = `손절 ${pnlPct.toFixed(2)}%${pos.stopLossExtended ? ` (유예 -${effectiveStopLoss.toFixed(1)}%)` : ''}`;
       exitType   = 'loss';
     }
 
@@ -2106,11 +2127,26 @@ async function executeEntry(candidate) {
 // ─── 실시간 포지션 가격 업데이트 ──────────────────────────────
 async function tickPositions() {
   // ── 실전 잔고 폴링 ─────────────────────────────────────────
-  // BOTH 모드: KR=0초 오프셋, US=15초 오프셋 → KIS 초당 API 한도 분산
-  // (토큰 발급 요청이 동시에 몰리지 않도록 타이밍 엇갈리기)
+  // 🕐 장 시간대별 잔고 API 분리:
+  //   - 국내장(08:50~15:30 KST): 국내 원화 잔고만 조회 → KIS KR API 사용
+  //   - 미국장(23:30~06:00 KST): 미국 달러 잔고만 조회 → KIS US API 사용
+  //   - 장외시간(그 외): 마지막 조회 캐시 유지, 60초마다 각자 담당 API만 폴링
   if (STATE.mode === 'live' && KEYS.appKey && KEYS.accountNo) {
-    // ── 국내 원화 잔고 30초마다 폴링 ─────────────────────────
-    if ((STATE.market === 'KR' || STATE.market === 'BOTH')) {
+    const krOpen = isKrMarketOpen();         // 09:00~15:30 기준 (여기선 08:50부터 허용)
+    const usOpen = isUsMarketOpen();         // 23:30~06:00
+    const now = new Date();
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+    const day = now.getDay();
+    // 국내장 전 준비 포함: 08:50~15:30 (평일)
+    const krSessionActive = (day >= 1 && day <= 5) && (nowMin >= 8 * 60 + 50) && (nowMin <= 15 * 60 + 30);
+    // 미국장 세션: isUsMarketOpen() 그대로
+    const usSessionActive = usOpen;
+
+    // ── 국내 원화 잔고 폴링 ───────────────────────────────────
+    // 국내장 세션(08:50~15:30)이거나 market=KR/BOTH이고 미국장이 아닐 때만
+    const shouldFetchKr = (STATE.market === 'KR' || STATE.market === 'BOTH') &&
+                          (krSessionActive || (!usSessionActive));
+    if (shouldFetchKr) {
       const elapsed = Date.now() - STATE.liveBalanceTs;
       if (!STATE.liveBalanceFetching && elapsed > 30000) {
         STATE.liveBalanceFetching = true;
@@ -2125,27 +2161,28 @@ async function tickPositions() {
           STATE.liveBalanceTs = Date.now();
           STATE.liveBalanceFetching = false;
           if (bal > 0) STATE.liveBalanceKrwForUs = bal; // 통합증거금 자동 동기화
-          if (bal > 0 && bal !== prev) { addLog('info', `💰 국내 잔고 갱신: ${fmtPrice(bal)}원 (통합증거금 — 미국주식 가용)`); updateStatsUI(); }
-          else if (bal === 0 && prev > 0) updateStatsUI();
+          if (bal > 0 && bal !== prev) { addLog('info', `💰 국내 잔고 갱신: ${fmtPrice(bal)}원`); updateStatsUI(); }
           else updateStatsUI();
         }).catch(() => {
           STATE.liveBalanceFetching = false;
-          STATE.liveBalanceTs = Date.now(); // 실패도 "조회 완료"로 간주 — 30초 후 재시도
+          STATE.liveBalanceTs = Date.now();
         });
       }
     }
-    // ── 미국 달러 잔고 폴링 ──
-    // 봇 실행 중: 스캔 사이클의 배치 조회(/api/kis/us/prices)에서 잔고도 함께 처리
-    //            → 여기서 추가 조회 시 토큰 중복 발급 위험 → 봇 실행 중에는 스킵
-    // 봇 정지 중: 60초마다 단독 폴링 (UI 표시용)
-    if ((STATE.market === 'US' || STATE.market === 'BOTH')) {
+
+    // ── 미국 달러 잔고 폴링 ───────────────────────────────────
+    // 미국장 세션(23:30~06:00)이거나 market=US/BOTH이고 국내장 세션이 아닐 때만
+    // 봇 실행 중: 배치 조회가 담당 → 여기선 스킵
+    // 봇 정지 중: 60초마다 UI 표시용 폴링
+    const shouldFetchUs = (STATE.market === 'US' || STATE.market === 'BOTH') &&
+                          (usSessionActive || (!krSessionActive));
+    if (shouldFetchUs) {
       const elapsedUsd = Date.now() - STATE.liveBalanceUsdTs;
       const botRunning = STATE.running;
-      // 봇 실행 중이면 배치 조회가 담당 — 여기서는 60초 이상 경과 + 봇 정지일 때만 폴링
       const canFetchUs = !STATE.liveBalanceUsdFetching && (
         botRunning
-          ? false  // 봇 실행 중: tickPositions에서 잔고 조회 안 함 (배치에서 처리)
-          : elapsedUsd > 60000  // 봇 정지: 60초마다 UI 표시용 폴링
+          ? false         // 봇 실행 중: 배치 조회가 담당
+          : elapsedUsd > 60000  // 봇 정지: 60초마다 UI 폴링
       );
       if (canFetchUs) {
         STATE.liveBalanceUsdFetching = true;
