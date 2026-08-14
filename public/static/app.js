@@ -316,13 +316,14 @@ function saveApiKeys() {
 
 /**
  * KIS 토큰 발급 — 서버 프록시(/api/kis/token) 경유
- * ∙ 로컬 샌드박스: 해외 서버 → KIS 연결 차단 → serverBlocked:true 반환
- * ∙ Cloudflare Pages 배포 후: 엣지 서버 → KIS 정상 연결 기대
+ * ✅ 실제 access_token을 localStorage에 캐싱 (22.5시간 TTL)
+ *    → 모든 KIS API 요청에 kisToken으로 포함해서 서버 Rate Limit 완전 방지
  */
 async function kisGetTokenViaProxy(appKey, appSecret) {
   const cached = localStorage.getItem('kis_token_cached');
   const exp    = parseInt(localStorage.getItem('kis_token_exp') || '0');
-  if (cached && Date.now() < exp) return cached;
+  // 캐시된 토큰이 있고 만료 전이면 바로 반환
+  if (cached && cached !== 'proxy_ok' && cached.length > 50 && Date.now() < exp) return cached;
 
   const res = await fetch('/api/kis/token', {
     method: 'POST',
@@ -331,18 +332,31 @@ async function kisGetTokenViaProxy(appKey, appSecret) {
   });
   const data = await res.json();
   if (!res.ok || data.serverBlocked) {
-    // 서버 프록시 차단 → null 반환 (호출자에서 처리)
     throw Object.assign(new Error(data.error || '서버 프록시 차단'), { serverBlocked: true });
   }
-  // 프록시 성공 시 클라이언트 캐시에도 저장 (상징적 — 실제 토큰은 서버 KV에 캐시됨)
+  // ✅ 실제 access_token을 localStorage에 캐싱 (22.5시간 TTL)
+  if (data.accessToken && data.accessToken.length > 50) {
+    localStorage.setItem('kis_token_cached', data.accessToken);
+    localStorage.setItem('kis_token_exp', String(Date.now() + 82800 * 1000));
+    return data.accessToken;
+  }
+  // 토큰 반환이 없으면 proxy_ok 표시만 (하위 호환)
   localStorage.setItem('kis_token_cached', 'proxy_ok');
   localStorage.setItem('kis_token_exp', String(Date.now() + 82800 * 1000));
-  return 'proxy_ok';  // 토큰 자체는 서버에서 관리
+  return 'proxy_ok';
 }
 
 /** KIS 토큰 반환 — 서버 프록시 경유 (캐시 포함) */
 async function getKisToken() {
   return await kisGetTokenViaProxy(KEYS.appKey, KEYS.appSecret);
+}
+
+/** 현재 캐시된 KIS 토큰 반환 (발급 없이) — API 요청 body에 포함용 */
+function getCachedKisToken() {
+  const t = localStorage.getItem('kis_token_cached');
+  const exp = parseInt(localStorage.getItem('kis_token_exp') || '0');
+  if (t && t !== 'proxy_ok' && t.length > 50 && Date.now() < exp) return t;
+  return null;
 }
 
 async function testApiConnection() {
@@ -387,8 +401,12 @@ async function testApiConnection() {
     const data = await res.json();
 
     if (data.ok) {
-      // ✅ 토큰 발급 성공 — KIS 연결 + 인증 모두 OK
-      localStorage.setItem('kis_token_cached', 'proxy_ok');
+      // ✅ 토큰 발급 성공 — 실제 access_token을 localStorage에 캐싱
+      if (data.accessToken && data.accessToken.length > 50) {
+        localStorage.setItem('kis_token_cached', data.accessToken);
+      } else {
+        localStorage.setItem('kis_token_cached', 'proxy_ok');
+      }
       localStorage.setItem('kis_token_exp', String(Date.now() + 82800 * 1000));
       showApiResult('✅ KIS 연결 성공! 저장 버튼을 눌러 키를 저장하세요', 'ok');
       addLog('info', '✅ KIS 연결 성공 — 서버 프록시 모드 (실전 모드 사용 가능)');
@@ -1549,6 +1567,7 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo,
+            kisToken: getCachedKisToken(),
             symbol: pos.ticker, excd,
             side: 'sell', qty: pos.qty,
             price: actualExitPrice.toFixed(2), // 달러 지정가 (현재가 이하 → 즉시체결)
@@ -1574,6 +1593,7 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo,
+            kisToken: getCachedKisToken(),
             ticker: pos.ticker, side: 'sell', qty: pos.qty,
           }),
         });
@@ -2065,6 +2085,7 @@ async function executeEntry(candidate) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo,
+            kisToken: getCachedKisToken(),
             symbol: candidate.ticker, excd,
             side: 'buy', qty: qtyInt,
             price: price.toFixed(2), // 지정가 (달러, 소수점 2자리)
@@ -2076,12 +2097,16 @@ async function executeEntry(candidate) {
           const detail = data.trId ? ` [trId:${data.trId} excd:${data.exchCd} hhmm:${data.hhmm}]` : '';
           throw new Error((data.error || JSON.stringify(data)) + detail);
         }
+        // ✅ ordNo 로깅 — 실제 주문번호 확인용 (없어도 rt_cd=0이면 접수된 것으로 처리)
+        addLog('info', `📥 미국 매수접수: ${candidate.ticker} ${qtyInt}주 @$${price.toFixed(2)} [ordNo:${data.ordNo||'없음'} trId:${data.trId||''}]`);
+        if (!data.ordNo) addLog('warn', `⚠️ ${candidate.ticker} 매수 ordNo 없음 — KIS 접수 여부 HTS에서 확인 필요`);
       } else {
         const res = await fetch('/api/kis/order', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo,
+            kisToken: getCachedKisToken(),
             ticker: candidate.ticker, side: 'buy', qty: qtyInt,
           }),
         });
@@ -2289,7 +2314,7 @@ async function getLiveBalance() {
     const res = await fetch('/api/kis/balance', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo }),
+      body: JSON.stringify({ appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo, kisToken: getCachedKisToken() }),
       signal: AbortSignal.timeout(8000),
     });
     const data = await res.json();
@@ -2352,7 +2377,7 @@ async function _doGetUsLiveBalance() {
     const res = await fetch('/api/kis/us/balance', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo }),
+      body: JSON.stringify({ appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo, kisToken: getCachedKisToken() }),
     });
     const data = await res.json();
     if (data.serverBlocked) {
@@ -2572,7 +2597,7 @@ async function syncKisPositions() {
         const res = await fetch('/api/kis/balance', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo }),
+          body: JSON.stringify({ appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo, kisToken: getCachedKisToken() }),
           signal: AbortSignal.timeout(12000),
         });
         const data = await res.json();
@@ -2616,7 +2641,7 @@ async function syncKisPositions() {
         const res = await fetch('/api/kis/us/balance', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo }),
+          body: JSON.stringify({ appKey: KEYS.appKey, appSecret: KEYS.appSecret, accountNo: KEYS.accountNo, kisToken: getCachedKisToken() }),
           signal: AbortSignal.timeout(12000),
         });
         const data = await res.json();

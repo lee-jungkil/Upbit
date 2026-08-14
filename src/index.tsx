@@ -38,7 +38,14 @@ function invalidateKisToken(appKey: string) {
   // 마지막 발급 시각은 유지 — 재발급도 쿨다운 적용
 }
 
-async function getKisToken(env: Bindings & Record<string, string>, appKey: string, appSecret: string): Promise<{ token: string; error?: string; networkError?: boolean }> {
+async function getKisToken(env: Bindings & Record<string, string>, appKey: string, appSecret: string, kisToken?: string): Promise<{ token: string; error?: string; networkError?: boolean }> {
+  // ✅ 클라이언트가 직접 발급한 토큰을 전달한 경우 → 재발급 없이 즉시 사용
+  //    Cloudflare Workers는 인스턴스 간 메모리 비공유 → KV 없으면 매 요청마다 재발급 → Rate Limit
+  //    해결: 클라이언트가 토큰을 localStorage에 캐싱 후 모든 요청에 kisToken으로 전송
+  if (kisToken && kisToken.length > 50) {
+    return { token: kisToken }
+  }
+
   const cacheKey = 'kis_token_' + appKey.slice(-8)
 
   // 1) KV 캐시 조회
@@ -221,14 +228,12 @@ app.post('/api/kis/token', async (c) => {
   const result = await getKisToken({ ...c.env } as any, appKey, appSecret)
   if (!result.token) {
     if (result.networkError) {
-      // 네트워크 차단/타임아웃 — 서버→KIS 연결 자체가 안 됨
       return c.json({
         error: result.error || '네트워크 연결 실패',
         serverBlocked: true,
         hint: '서버→KIS 네트워크 연결 실패입니다. Cloudflare Pages 배포 후 재시도해 주세요.',
       }, 503)
     }
-    // KIS 서버에 도달했으나 인증 실패 (잘못된 키 등)
     return c.json({
       error: result.error || 'KIS 인증 실패',
       serverBlocked: false,
@@ -236,20 +241,23 @@ app.post('/api/kis/token', async (c) => {
       hint: 'KIS 서버에 정상 연결됐습니다. APP KEY / APP SECRET를 확인하세요.',
     }, 401)
   }
-  return c.json({ ok: true, kisReachable: true })
+  // ✅ 클라이언트가 토큰을 직접 캐싱할 수 있도록 access_token 반환
+  //    클라이언트는 이 토큰을 localStorage에 저장하고 모든 KIS API 요청 시 kisToken으로 전송
+  //    서버는 kisToken이 있으면 재발급 없이 그대로 사용 → Rate Limit 완전 해소
+  return c.json({ ok: true, kisReachable: true, accessToken: result.token })
 })
 
 // ── KIS 프록시: 잔고 조회 (서버→KIS 경유)
 app.post('/api/kis/balance', async (c) => {
   const body = await c.req.json().catch(() => ({})) as any
-  const { appKey, appSecret, accountNo } = body
+  const { appKey, appSecret, accountNo, kisToken } = body
   if (!appKey || !appSecret || !accountNo) {
     return c.json({ error: 'appKey, appSecret, accountNo 필수' }, 400)
   }
 
   // 토큰 취득 (최대 2회 시도: 만료 시 캐시 무효화 후 재발급)
   async function fetchBalance(retrying = false): Promise<Response> {
-    const { token, error: tokErr } = await getKisToken({ ...c.env } as any, appKey, appSecret)
+    const { token, error: tokErr } = await getKisToken({ ...c.env } as any, appKey, appSecret, kisToken)
     if (!token) return c.json({ error: tokErr || '토큰 발급 실패', serverBlocked: true }, 503)
 
     const [cano, acntPrdtCd] = accountNo.split('-')
@@ -317,7 +325,7 @@ app.post('/api/kis/balance', async (c) => {
 // ── KIS 프록시: 주문 실행 (서버→KIS 경유)
 app.post('/api/kis/order', async (c) => {
   const body = await c.req.json().catch(() => ({})) as any
-  const { appKey, appSecret, accountNo, ticker, side, qty } = body
+  const { appKey, appSecret, accountNo, ticker, side, qty, kisToken } = body
   // side: 'buy' | 'sell'
   if (!appKey || !appSecret || !accountNo || !ticker || !side || !qty) {
     return c.json({ error: 'appKey, appSecret, accountNo, ticker, side, qty 필수' }, 400)
@@ -325,12 +333,13 @@ app.post('/api/kis/order', async (c) => {
 
   // 토큰 취득 + rt_cd='1' 만료 시 1회 자동 재발급 (잔고조회와 동일한 패턴)
   async function doOrder(retrying = false): Promise<Response> {
-    const { token, error: tokErr } = await getKisToken({ ...c.env } as any, appKey, appSecret)
-    if (!token) return c.json({ error: tokErr || '토큰 발급 실패', serverBlocked: true }, 503)
-
+    const { token, error: tokErr } = await getKisToken({ ...c.env } as any, appKey, appSecret, kisToken)
+    if (!token) {
+      return c.json({ error: tokErr || '토큰 실패' }, 401)
+    }
+    const [cano, acntPrdtCd] = accountNo.split('-')
+    const trId = side === 'buy' ? 'TTTC0852U' : 'TTTC0801U'
     try {
-      const [cano, acntPrdtCd] = accountNo.split('-')
-      const trId = side === 'buy' ? 'TTTC0802U' : 'TTTC0801U'
       const res = await fetch('https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/trading/order-cash', {
         method: 'POST',
         headers: {
@@ -387,12 +396,12 @@ app.post('/api/kis/order', async (c) => {
 // ── KIS 프록시: 미국주식 현재가 (서버→KIS HHDFS00000300)
 app.post('/api/kis/us/price', async (c) => {
   const body = await c.req.json().catch(() => ({})) as any
-  const { appKey, appSecret, symbol, excd } = body
+  const { appKey, appSecret, symbol, excd, kisToken } = body
   // excd: NAS=나스닥, NYS=뉴욕, AMS=아멕스
   if (!appKey || !appSecret || !symbol) {
     return c.json({ error: 'appKey, appSecret, symbol 필수' }, 400)
   }
-  const { token, error, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret)
+  const { token, error, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret, kisToken)
   if (!token) {
     return c.json({ error: error || '토큰 실패', serverBlocked: !!networkError }, networkError ? 503 : 401)
   }
@@ -431,7 +440,7 @@ app.post('/api/kis/us/price', async (c) => {
 // CF Workers 다중 인스턴스 문제 해결 — 같은 Worker 인스턴스에서 토큰 1회만 발급
 app.post('/api/kis/us/prices', async (c) => {
   const body = await c.req.json().catch(() => ({})) as any
-  const { appKey, appSecret, accountNo } = body
+  const { appKey, appSecret, accountNo, kisToken } = body
   // symbols: [{ ticker: 'AAPL', excd: 'NAS' }, ...] — 최대 10개로 제한 (KIS 초당 1회 rate limit)
   const symbolsRaw: Array<{ticker:string; excd:string}> = Array.isArray(body.symbols) ? body.symbols : []
   const symbols = symbolsRaw.slice(0, 10)  // 최대 10개 — 10초 이내 완료
@@ -440,7 +449,7 @@ app.post('/api/kis/us/prices', async (c) => {
     return c.json({ error: 'appKey, appSecret, symbols[] 필수' }, 400)
   }
   // ── 토큰 1회만 발급 — 시세 + 잔고 모두 이 토큰으로 처리
-  const { token, error, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret)
+  const { token, error, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret, kisToken)
   if (!token) {
     return c.json({ error: error || '토큰 실패', serverBlocked: !!networkError }, networkError ? 503 : 401)
   }
@@ -535,13 +544,13 @@ app.post('/api/kis/us/prices', async (c) => {
 // ── KIS 프록시: 미국주식 잔고 조회
 app.post('/api/kis/us/balance', async (c) => {
   const body = await c.req.json().catch(() => ({})) as any
-  const { appKey, appSecret, accountNo } = body
+  const { appKey, appSecret, accountNo, kisToken } = body
   if (!appKey || !appSecret || !accountNo) {
     return c.json({ error: 'appKey, appSecret, accountNo 필수' }, 400)
   }
 
   async function fetchUsBalance(retrying = false): Promise<Response> {
-    const { token, error: tokErr, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret)
+    const { token, error: tokErr, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret, kisToken)
     if (!token) {
       return c.json({ error: tokErr || '토큰 실패', serverBlocked: !!networkError }, networkError ? 503 : 401)
     }
@@ -611,14 +620,14 @@ app.post('/api/kis/us/balance', async (c) => {
 // ── KIS 프록시: 미국주식 주문 (시간대 자동 선택 + 서머타임 대응)
 app.post('/api/kis/us/order', async (c) => {
   const body = await c.req.json().catch(() => ({})) as any
-  const { appKey, appSecret, accountNo, symbol, excd, side, qty, price } = body
+  const { appKey, appSecret, accountNo, symbol, excd, side, qty, price, kisToken } = body
   if (!appKey || !appSecret || !accountNo || !symbol || !side || !qty || !price) {
     return c.json({ error: 'appKey, appSecret, accountNo, symbol, side, qty, price 필수' }, 400)
   }
 
   // 토큰 만료 시 1회 자동 재발급 (국내 주문과 동일한 패턴)
   async function doUsOrder(retrying = false): Promise<Response> {
-    const { token, error, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret)
+    const { token, error, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret, kisToken)
     if (!token) {
       return c.json({ error: error || '토큰 실패', serverBlocked: !!networkError }, networkError ? 503 : 401)
     }
