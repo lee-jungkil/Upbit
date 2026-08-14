@@ -664,10 +664,10 @@ app.post('/api/kis/us/order', async (c) => {
           CANO: cano, ACNT_PRDT_CD: acntPrdtCd,
           OVRS_EXCG_CD: exchCd,
           PDNO: symbol,
-          // 매도: ORD_DVSN=00 지정가, price=현재가×(1-0.5%) → 즉시체결 보장
-          ORD_DVSN: '00',
+          ORD_DVSN: '00',          // 지정가
           ORD_QTY: String(qty),
           OVRS_ORD_UNPR: String(price),
+          SLL_TYPE: side === 'sell' ? '00' : '',  // ✅ 매도 필수 필드 (빈값=매수, '00'=매도)
           ORD_SVR_DVSN_CD: '0',
         }),
         // @ts-ignore
