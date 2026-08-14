@@ -1529,7 +1529,7 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
   //   - 매도 지정가 > 현재 매수호가 → 미체결 대기 (이게 문제였음!)
   //   - 따라서 현재가보다 낮게 설정해야 즉시 체결됨
   //   - 미국주식은 슬리피지를 더 크게(0.1%) 설정해서 반드시 즉시 체결 보장
-  const usExitSlip = Math.max(slip, 0.1); // 미국주식 매도 최소 슬리피지 0.1%
+  const usExitSlip = Math.max(slip, 0.5); // 미국주식 매도 최소 슬리피지 0.5% → 즉시체결 보장
   const actualExitPrice = isUs
     ? Math.round(pos.currentPrice * (1 - usExitSlip / 100) * 100) / 100  // 달러: 현재가보다 낮은 지정가 (즉시체결)
     : Math.round(pos.currentPrice * (1 - slip / 100));              // 원화 정수
@@ -3109,9 +3109,10 @@ function isKrMarketClosingSoon() {
   return min >= 15 * 60 && min <= 15 * 60 + 30;
 }
 
-/** 미국 야간 정규장 여부 (평일+토요일 23:30~06:00 KST)
- *  - 미국 장 : EST 09:30~16:00 = KST 23:30~06:00
- *  - 토요일 00:00~06:00 도 포함 (금요일 뉴욕장 연속)
+/** 미국 정규장 여부 (서머타임 대응 포함)
+ *  - 표준시(EST, 11~3월): 23:30~06:00 KST
+ *  - 서머타임(EDT, 3~11월): 22:30~05:00 KST
+ *  ⚠️ 보수적 처리: 22:30부터 장 열린 것으로 간주 (8월 등 서머타임 기간 대응)
  */
 function isUsMarketOpen() {
   const now = new Date();
@@ -3120,25 +3121,26 @@ function isUsMarketOpen() {
   const min = h * 60 + m;
   // 일요일은 완전 마감
   if (day === 0) return false;
-  // 평일(월~금): 23:30 이후 또는 00:00~06:00
+  // 평일(월~금): 22:30 이후 또는 00:00~05:00 (서머타임 기준 넉넉히)
   if (day >= 1 && day <= 5) {
-    return min >= 23 * 60 + 30 || min <= 6 * 60;
+    return min >= 22 * 60 + 30 || min <= 5 * 60;
   }
-  // 토요일: 00:00~06:00 (금요일 뉴욕장 마지막)
+  // 토요일: 00:00~05:00 (금요일 뉴욕장 마지막 — 서머타임 기준)
   if (day === 6) {
-    return min <= 6 * 60;
+    return min <= 5 * 60;
   }
   return false;
 }
 
-/** 미국 장 마감 30분 전 여부 (05:30~06:00 KST) */
+/** 미국 장 마감 30분 전 여부 (서머타임: 04:30~05:00 / 표준시: 05:30~06:00 KST) */
 function isUsMarketClosingSoon() {
   const now = new Date();
   const day = now.getDay();
   if (day === 0) return false;
   const min = now.getHours() * 60 + now.getMinutes();
-  // 06:00 기준 30분 전 = 05:30~06:00
-  return min >= 5 * 60 + 30 && min <= 6 * 60;
+  // 서머타임(04:30~05:00) 또는 표준시(05:30~06:00) 양쪽 모두 포함
+  return (min >= 4 * 60 + 30 && min <= 5 * 60) ||
+         (min >= 5 * 60 + 30 && min <= 6 * 60);
 }
 
 /** 현재 시장 모드에서 신규 진입 가능한지 */

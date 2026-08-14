@@ -585,91 +585,89 @@ app.post('/api/kis/us/balance', async (c) => {
   }
 })
 
-// ── KIS 프록시: 미국주식 주문 (시간대 자동 선택)
+// ── KIS 프록시: 미국주식 주문 (시간대 자동 선택 + 서머타임 대응)
 app.post('/api/kis/us/order', async (c) => {
   const body = await c.req.json().catch(() => ({})) as any
   const { appKey, appSecret, accountNo, symbol, excd, side, qty, price } = body
-  // side: 'buy'|'sell', excd: NASD|NYSE|AMEX, price: 지정가(달러)
   if (!appKey || !appSecret || !accountNo || !symbol || !side || !qty || !price) {
     return c.json({ error: 'appKey, appSecret, accountNo, symbol, side, qty, price 필수' }, 400)
   }
-  const { token, error, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret)
-  if (!token) {
-    return c.json({ error: error || '토큰 실패', serverBlocked: !!networkError }, networkError ? 503 : 401)
-  }
-  try {
-    const [cano, acntPrdtCd] = accountNo.split('-')
-    // NAS→NASD, NYS→NYSE 정규화 (이미 4글자인 NASD/NYSE도 안전하게 처리)
-    const rawCd = (excd || 'NASD').toUpperCase()
-    const exchCd = (rawCd === 'NAS' || rawCd === 'NASD') ? 'NASD'
-                 : (rawCd === 'NYS' || rawCd === 'NYSE') ? 'NYSE'
-                 : rawCd
 
-    // ── tr_id: 시간대 × 거래소 × 매수/매도 자동 선택 ──
-    // 한국투자증권 미국주식 거래 시간대 (한국시간 기준, 서머타임 무시 — 넉넉히 구분):
-    //   프리마켓(야간장) : 18:00 ~ 23:29  → TTTS0308U(NASD매수) / TTTS0305U(NYSE매수) 등
-    //   정규장           : 23:30 ~ 06:00  → TTTT1002U(매수) / TTTT1006U(매도) — 거래소 무관
-    //   주간거래(장전)    : 10:00 ~ 17:59  → TTTT1002U(매수) / TTTT1006U(매도)
-    //
-    // ※ 서머타임 적용 시 정규장이 22:30부터 시작하지만, KIS는 23:30을 기준으로 API tr_id를
-    //   구분하므로 서버에서는 23:30 고정 기준으로 처리.
-    //   서머타임 대응은 향후 개선 가능 (현재 한국 겨울 기준으로 동작)
-    const nowKst = new Date(Date.now() + 9 * 3600 * 1000)
-    const hhmm = nowKst.getUTCHours() * 100 + nowKst.getUTCMinutes()
-
-    // 프리마켓(야간장): 18:00~23:29 → TTTS 계열
-    // 정규장 + 주간장:  23:30~06:00 + 10:00~17:59 → TTTT 계열
-    const isPremarket = (hhmm >= 1800 && hhmm < 2330)
-
-    let trId: string
-    if (isPremarket) {
-      // 프리마켓(야간): 거래소별 구분
-      // NASD: 매수=TTTS0308U, 매도=TTTS0307U
-      // NYSE: 매수=TTTS0305U, 매도=TTTS0304U
-      if (exchCd === 'NYSE') {
-        trId = side === 'buy' ? 'TTTS0305U' : 'TTTS0304U'
-      } else {
-        // NASD (나스닥, AMEX 포함)
-        trId = side === 'buy' ? 'TTTS0308U' : 'TTTS0307U'
-      }
-    } else {
-      // 정규장(23:30~06:00) + 주간거래(10:00~17:59): 거래소 무관
-      // 매수=TTTT1002U, 매도=TTTT1006U
-      trId = side === 'buy' ? 'TTTT1002U' : 'TTTT1006U'
+  // 토큰 만료 시 1회 자동 재발급 (국내 주문과 동일한 패턴)
+  async function doUsOrder(retrying = false): Promise<Response> {
+    const { token, error, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret)
+    if (!token) {
+      return c.json({ error: error || '토큰 실패', serverBlocked: !!networkError }, networkError ? 503 : 401)
     }
+    try {
+      const [cano, acntPrdtCd] = accountNo.split('-')
+      const rawCd = (excd || 'NASD').toUpperCase()
+      const exchCd = (rawCd === 'NAS' || rawCd === 'NASD') ? 'NASD'
+                   : (rawCd === 'NYS' || rawCd === 'NYSE') ? 'NYSE'
+                   : rawCd
 
-    const res = await fetch('https://openapi.koreainvestment.com:9443/uapi/overseas-stock/v1/trading/order', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        authorization: `Bearer ${token}`,
-        appkey: appKey, appsecret: appSecret,
-        tr_id: trId, custtype: 'P',
-      },
-      body: JSON.stringify({
-        CANO: cano, ACNT_PRDT_CD: acntPrdtCd,
-        OVRS_EXCG_CD: exchCd,
-        PDNO: symbol,
-        // ── 주문구분 ──
-        // 매수: 00=지정가 (TTTT1002U)
-        // 매도: 00=지정가 (TTTT1006U) — price를 현재가 이하로 설정해야 즉시체결
-        //       31=MOO(장시작시장가), 33=MOC(장마감시장가) — 자동화봇은 지정가 즉시체결 방식 사용
-        ORD_DVSN: '00',
-        ORD_QTY: String(qty),
-        // 매도 시: 전달된 price(현재가×슬리피지 적용 하향가)를 그대로 사용
-        // → 현재가보다 낮은 지정가 매도는 KIS에서 즉시 체결됨
-        OVRS_ORD_UNPR: String(price),
-        ORD_SVR_DVSN_CD: '0',
-      }),
-      // @ts-ignore
-      signal: AbortSignal.timeout(8000),
-    })
-    const data: any = await res.json()
-    if (data.rt_cd !== '0') return c.json({ error: data.msg1 || JSON.stringify(data), trId, exchCd, hhmm, isPremarket }, 400)
-    return c.json({ ok: true, ordNo: data.output?.odno, trId, exchCd })
-  } catch (e: any) {
-    return c.json({ error: e?.message || '미국주식 주문 실패', serverBlocked: true }, 503)
+      // ── tr_id 시간대 분기 (서머타임 대응) ──────────────────────────────
+      // 서머타임(EDT, 3~11월): 미국 정규장 22:30~05:00 KST
+      // 표준시  (EST, 11~3월): 미국 정규장 23:30~06:00 KST
+      //
+      // 프리마켓(야간): 18:00~22:29 → TTTS 계열
+      // 정규장+주간:    22:30~05:00(서머) / 23:30~06:00(표준) + 10:00~17:59 → TTTT 계열
+      //
+      // ✅ 22:30 기준으로 TTTT 사용 → 서머타임(현재 8~10월) 완벽 대응
+      //    표준시 22:30~23:29에 TTTT 전송 시 KIS 에러 → catch→false → 포지션 유지(안전)
+      const nowKst = new Date(Date.now() + 9 * 3600 * 1000)
+      const hhmm = nowKst.getUTCHours() * 100 + nowKst.getUTCMinutes()
+      const isPremarket = (hhmm >= 1800 && hhmm < 2230)  // 프리마켓: 18:00~22:29
+
+      let trId: string
+      if (isPremarket) {
+        trId = (exchCd === 'NYSE')
+          ? (side === 'buy' ? 'TTTS0305U' : 'TTTS0304U')
+          : (side === 'buy' ? 'TTTS0308U' : 'TTTS0307U')
+      } else {
+        // 정규장(22:30~) + 주간거래(10:00~17:59)
+        trId = side === 'buy' ? 'TTTT1002U' : 'TTTT1006U'
+      }
+
+      const res = await fetch('https://openapi.koreainvestment.com:9443/uapi/overseas-stock/v1/trading/order', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          authorization: `Bearer ${token}`,
+          appkey: appKey, appsecret: appSecret,
+          tr_id: trId, custtype: 'P',
+        },
+        body: JSON.stringify({
+          CANO: cano, ACNT_PRDT_CD: acntPrdtCd,
+          OVRS_EXCG_CD: exchCd,
+          PDNO: symbol,
+          // 매도: ORD_DVSN=00 지정가, price=현재가×(1-0.5%) → 즉시체결 보장
+          ORD_DVSN: '00',
+          ORD_QTY: String(qty),
+          OVRS_ORD_UNPR: String(price),
+          ORD_SVR_DVSN_CD: '0',
+        }),
+        // @ts-ignore
+        signal: AbortSignal.timeout(8000),
+      })
+      const data: any = await res.json()
+      if (data.rt_cd !== '0') {
+        // 토큰 만료 → 캐시 무효화 후 1회 재시도
+        if (data.rt_cd === '1' && !retrying) {
+          invalidateKisToken(appKey)
+          if (c.env.KV) await c.env.KV.delete('kis_token_' + appKey.slice(-8)).catch(() => {})
+          return doUsOrder(true)
+        }
+        const errMsg = data.msg1 || data.msg2 || JSON.stringify(data).slice(0, 200)
+        return c.json({ error: errMsg, trId, exchCd, hhmm, isPremarket, rt_cd: data.rt_cd }, 400)
+      }
+      return c.json({ ok: true, ordNo: data.output?.odno, trId, exchCd, hhmm, isPremarket })
+    } catch (e: any) {
+      return c.json({ error: e?.message || '미국주식 주문 실패', serverBlocked: true }, 503)
+    }
   }
+
+  return doUsOrder()
 })
 
 // ── 환율 조회 프록시 (한국은행 API → 원/달러 환율)
