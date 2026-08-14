@@ -350,7 +350,15 @@ app.post('/api/kis/order', async (c) => {
               : `KIS 응답코드 ${rtCd}`
         return c.json({ error: errMsg, rtCd, hint, trId, ticker }, 400)
       }
-      return c.json({ ok: true, ordNo: data.output?.odno, trId })
+      // ✅ odno(주문번호) 검증 — rt_cd=0이지만 odno가 빈 문자열이면 실제 주문 미접수
+      const odno = data.output?.odno
+      if (!odno || odno.trim() === '') {
+        return c.json({
+          error: `KIS 국내 주문접수 실패 — 주문번호 없음 (rt_cd=0이지만 odno 미반환) [trId:${trId}]`,
+          raw: JSON.stringify(data).slice(0, 300), trId, ticker,
+        }, 400)
+      }
+      return c.json({ ok: true, ordNo: odno, trId })
     } catch (e: any) {
       const msg = e?.message || '주문 실패'
       const isNetwork = msg.includes('fetch') || msg.includes('connect') || msg.includes('timeout') || msg.includes('network')
@@ -661,7 +669,15 @@ app.post('/api/kis/us/order', async (c) => {
         const errMsg = data.msg1 || data.msg2 || JSON.stringify(data).slice(0, 200)
         return c.json({ error: errMsg, trId, exchCd, hhmm, isPremarket, rt_cd: data.rt_cd }, 400)
       }
-      return c.json({ ok: true, ordNo: data.output?.odno, trId, exchCd, hhmm, isPremarket })
+      // ✅ odno(주문번호) 검증 — rt_cd=0이지만 odno가 빈 문자열이면 실제 주문 미접수로 처리
+      const odno = data.output?.odno
+      if (!odno || odno.trim() === '') {
+        return c.json({
+          error: `KIS 주문접수 실패 — 주문번호 없음 (rt_cd=0이지만 odno 미반환) [trId:${trId}]`,
+          raw: JSON.stringify(data).slice(0, 300), trId, exchCd, hhmm, isPremarket,
+        }, 400)
+      }
+      return c.json({ ok: true, ordNo: odno, trId, exchCd, hhmm, isPremarket })
     } catch (e: any) {
       return c.json({ error: e?.message || '미국주식 주문 실패', serverBlocked: true }, 503)
     }

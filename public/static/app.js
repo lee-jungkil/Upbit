@@ -1560,8 +1560,13 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
           const detail = data.trId ? ` [trId:${data.trId} excd:${data.exchCd} hhmm:${data.hhmm}]` : '';
           throw new Error((data.error || JSON.stringify(data)) + detail);
         }
-        // ✅ 미국 매도 접수 성공 — 지정가(현재가-0.1%) 즉시체결 방식
-        addLog('info', `📤 미국 매도접수: ${pos.ticker} ${pos.qty}주 @$${actualExitPrice.toFixed(2)} (지정가) [ordNo:${data.ordNo||'-'} trId:${data.trId}]`);
+        // ✅ ordNo(주문번호) 필수 검증 — 없으면 KIS 실제 주문 미접수로 간주
+        if (!data.ordNo || data.ordNo.trim() === '') {
+          const detail = data.trId ? ` [trId:${data.trId} hhmm:${data.hhmm} raw:${JSON.stringify(data).slice(0,150)}]` : '';
+          throw new Error(`KIS 주문번호(odno) 없음 — 실제 주문 미제출` + detail);
+        }
+        // ✅ 미국 매도 접수 성공 — 지정가(현재가-0.5%) 즉시체결 방식
+        addLog('info', `📤 미국 매도접수: ${pos.ticker} ${pos.qty}주 @$${actualExitPrice.toFixed(2)} (지정가) [ordNo:${data.ordNo} trId:${data.trId}]`);
       } else {
         // 국내주식 매도
         const res = await fetch('/api/kis/order', {
@@ -1580,8 +1585,12 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
           const trInfo = data.trId   ? ` [trId:${data.trId}]`  : '';
           throw new Error((data.error || JSON.stringify(data)) + rtCd + trInfo + hint);
         }
+        // ✅ ordNo(주문번호) 필수 검증 — 없으면 KIS 실제 주문 미접수로 간주
+        if (!data.ordNo || data.ordNo.trim() === '') {
+          throw new Error(`KIS 국내 주문번호(odno) 없음 — 실제 주문 미제출 [raw:${JSON.stringify(data).slice(0,150)}]`);
+        }
         // ✅ 국내 매도 접수 성공 — 시장가(ORD_DVSN=01) 즉시체결
-        addLog('info', `📤 국내 매도접수: ${pos.ticker} ${pos.qty}주 (시장가) [ordNo:${data.ordNo||'-'} trId:TTTC0801U]`);
+        addLog('info', `📤 국내 매도접수: ${pos.ticker} ${pos.qty}주 (시장가) [ordNo:${data.ordNo} trId:TTTC0801U]`);
       }
     } catch(e) {
       addLog('error', `❌ 매도 실패: ${pos.ticker} — ${e.message}`);
