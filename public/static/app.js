@@ -3,6 +3,36 @@
 // KIS (한국투자증권) API 연동 — 국내 + 미국주식 지원
 // ============================================================
 
+// ─── 단일 탭 리더 선출 (BroadcastChannel 기반) ────────────────
+// 여러 기기/탭에서 동시에 봇을 실행하면 주문이 중복되므로
+// 새 탭이 "봇 시작"하면 기존 탭의 봇은 자동 정지됨
+const BOT_CHANNEL_NAME = 'stockbot_leader';
+let _botChannel = null;
+let _botTabId = Math.random().toString(36).slice(2); // 이 탭의 고유 ID
+
+function initBotChannel() {
+  try {
+    _botChannel = new BroadcastChannel(BOT_CHANNEL_NAME);
+    _botChannel.onmessage = (e) => {
+      // 다른 탭이 봇을 시작했으면 → 이 탭의 봇 강제 정지
+      if (e.data?.type === 'BOT_STARTED' && e.data?.tabId !== _botTabId) {
+        if (STATE.running) {
+          addLog('warn', `⚠️ 다른 기기/탭에서 봇이 시작됨 → 이 탭 봇 자동 정지`);
+          stopBot();
+        }
+      }
+    };
+  } catch(e) {
+    // BroadcastChannel 미지원 환경 (구형 브라우저) → 무시
+    _botChannel = null;
+  }
+}
+function notifyBotStarted() {
+  if (_botChannel) {
+    _botChannel.postMessage({ type: 'BOT_STARTED', tabId: _botTabId, ts: Date.now() });
+  }
+}
+
 // ─── 전역 상태 ───────────────────────────────────────────────
 const STATE = {
   running: false,
@@ -1179,6 +1209,9 @@ async function startBot() {
   STATE.running = true;
   STATE._balWarnedOnce = false;  // 봇 재시작 시 경고 플래그 초기화
 
+  // 다른 탭/기기에 "봇 시작" 알림 → 해당 탭은 자동 정지
+  notifyBotStarted();
+
   // 기존 포지션이 없을 때만 페이퍼 잔고 초기화 (재시작 시 포지션 유지)
   const hasExistingPos = STATE.positions.length > 0;
   if (!hasExistingPos) STATE.paperBalance = STATE.config.paperCapital;
@@ -1440,9 +1473,13 @@ async function checkPositionsForExit() {
       // 슬리피지 적용: 시장가 매도 시 불리하게 체결
       const slippage  = ep.slippagePct;
       const netPnlPct = pnlPct - 0.245 - slippage; // 수수료 + 슬리피지 차감
-      await executeExit(pos, exitReason, netPnlPct, exitType, slippage);
-      STATE.positions.splice(i, 1);
-      savePositions(); // 청산 즉시 localStorage 갱신
+      const exitOk = await executeExit(pos, exitReason, netPnlPct, exitType, slippage);
+      // ✅ 실전: API 매도 성공(exitOk=true) 시에만 포지션 제거
+      // ✅ 페이퍼: 항상 포지션 제거
+      if (exitOk) {
+        STATE.positions.splice(i, 1);
+        savePositions(); // 청산 즉시 localStorage 갱신
+      }
     }   // end if (exitReason)
   }     // end for loop
 }       // end checkPositionsForExit
@@ -1513,7 +1550,7 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
       }
     } catch(e) {
       addLog('error', `❌ 매도 실패: ${pos.ticker} — ${e.message}`);
-      return; // ← 매도 API 실패 시 즉시 종료 (잔고복원·기록 하지 않음)
+      return false; // ← 매도 API 실패: false 반환 → 포지션 유지
     }
     // ── 실전: 매도 성공 → liveBalance 즉시 복원 (매도대금 반영) ──
     // profitAmt는 원화 기준 손익, investAmt = entryPrice * qty (원화 환산)
@@ -1571,6 +1608,7 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
   STATE.recentResults.push({ win: isWin, pnlPct: netPnlPct });
   if (STATE.recentResults.length > 30) STATE.recentResults.shift(); // 최대 30회 보관
   calcAdaptiveMode(); // 10회 단위 평가
+  return true; // ✅ 청산 완전 성공
 }
 
 // 신규 진입 스캔
