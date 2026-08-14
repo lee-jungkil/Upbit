@@ -1375,18 +1375,15 @@ async function runScan() {
 const EXIT_PARAMS = {
   // ⚡ 스캘핑: 빠른 익절·손절, 타이트한 트레일링
   scalping: {
-    maxHoldSec:      900,   // 최대 보유 15분
-    // 트레일링 스탑: 익절목표 돌파 후 고점에서 얼마 빠지면 매도
-    trailTriggerMult: 1.0,  // 익절목표 × 1.0 = 목표 도달 즉시 트레일 발동
-    trailDropPct:     0.4,  // 고점에서 0.4%p 하락 시 청산 (ex: 고점 2% → 1.6% 이하 시 매도)
-    // 슬리피지: 시장가 매도 시 불리한 방향으로 미끄러짐
-    slippagePct:      0.05, // 0.05% 슬리피지 (스캘핑 종목은 유동성 높아 낮음)
-    // 시간 청산: maxHold 경과 + 소폭 수익 있으면 청산
+    maxHoldSec:      1800,  // 최대 보유 30분 (기존 15분 → 여유 확보)
+    trailTriggerMult: 1.0,
+    trailDropPct:     0.4,
+    slippagePct:      0.05,
     timeExitMinPnl:   0.1,
   },
   // 📊 거래량: 중간 트레일, 더 긴 보유
   volume: {
-    maxHoldSec:      1800,
+    maxHoldSec:      3600,  // 60분 (기존 30분)
     trailTriggerMult: 1.0,
     trailDropPct:     0.6,
     slippagePct:      0.08,
@@ -1394,16 +1391,16 @@ const EXIT_PARAMS = {
   },
   // 🚀 모멘텀: 느슨한 트레일, 추세 타기
   momentum: {
-    maxHoldSec:      3600,
-    trailTriggerMult: 1.2,  // 익절목표 120% 도달 시 트레일 발동 (더 달리게)
+    maxHoldSec:      7200,  // 120분 (기존 60분)
+    trailTriggerMult: 1.2,
     trailDropPct:     1.0,
     slippagePct:      0.10,
-    timeExitMinPnl:   0.0,  // 시간 청산 시 수익 조건 없음
+    timeExitMinPnl:   0.0,
   },
   // ↩️ 평균회귀: 빠른 수익 확정, 반등 후 즉시 청산
   mean_reversion: {
-    maxHoldSec:      7200,
-    trailTriggerMult: 0.8,  // 익절목표의 80% 도달 시 바로 트레일 발동
+    maxHoldSec:      14400, // 240분 (기존 120분)
+    trailTriggerMult: 0.8,
     trailDropPct:     0.3,
     slippagePct:      0.12,
     timeExitMinPnl:   0.0,
@@ -1521,13 +1518,13 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
           }),
         });
         const data = await res.json();
-        if (data.serverBlocked) { addLog('warn', `⚠️ 미국 매도 서버 차단: ${pos.ticker}`); return; }
+        if (data.serverBlocked) { addLog('warn', `⚠️ 미국 매도 서버 차단: ${pos.ticker} — 포지션 유지`); return false; }
         if (!data.ok) {
           const detail = data.trId ? ` [trId:${data.trId} excd:${data.exchCd} hhmm:${data.hhmm}]` : '';
           throw new Error((data.error || JSON.stringify(data)) + detail);
         }
-        // ✅ 매도 주문 접수 성공 로그 (주문번호 + 주문가 명시)
-        addLog('info', `📤 미국 매도 접수: ${pos.ticker} ${pos.qty}주 @$${actualExitPrice.toFixed(2)} [ordNo:${data.ordNo || '-'} trId:${data.trId}]`);
+        // ✅ 미국 매도 접수 성공 — 지정가(현재가-0.1%) 즉시체결 방식
+        addLog('info', `📤 미국 매도접수: ${pos.ticker} ${pos.qty}주 @$${actualExitPrice.toFixed(2)} (지정가) [ordNo:${data.ordNo||'-'} trId:${data.trId}]`);
       } else {
         // 국내주식 매도
         const res = await fetch('/api/kis/order', {
@@ -1539,15 +1536,15 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
           }),
         });
         const data = await res.json();
-        if (data.serverBlocked) { addLog('warn', `⚠️ 국내 매도 서버 차단: ${pos.ticker} — ${data.error || '네트워크 오류'}`); return; }
+        if (data.serverBlocked) { addLog('warn', `⚠️ 국내 매도 서버 차단: ${pos.ticker} — ${data.error||'네트워크 오류'} — 포지션 유지`); return false; }
         if (!data.ok) {
           const hint   = data.hint   ? ` → ${data.hint}`   : '';
           const rtCd   = data.rtCd   ? ` [rt_cd:${data.rtCd}]` : '';
           const trInfo = data.trId   ? ` [trId:${data.trId}]`  : '';
           throw new Error((data.error || JSON.stringify(data)) + rtCd + trInfo + hint);
         }
-        // ✅ 국내 매도 주문 접수 성공 로그
-        addLog('info', `📤 국내 매도 접수: ${pos.ticker} ${pos.qty}주 @${fmtPrice(actualExitPrice)}원 [ordNo:${data.ordNo || '-'}]`);
+        // ✅ 국내 매도 접수 성공 — 시장가(ORD_DVSN=01) 즉시체결
+        addLog('info', `📤 국내 매도접수: ${pos.ticker} ${pos.qty}주 (시장가) [ordNo:${data.ordNo||'-'} trId:TTTC0801U]`);
       }
     } catch(e) {
       addLog('error', `❌ 매도 실패: ${pos.ticker} — ${e.message}`);
@@ -2497,7 +2494,9 @@ async function syncKisPositions() {
     }
 
     // ── 국내주식 보유종목 조회 ─────────────────────────────────
-    if (market === 'KR' || market === 'BOTH') {
+    // ⚠️ 재접속 시 항상 국내+미국 둘 다 조회 (market 설정과 무관)
+    // → KIS에 실보유가 있으면 무조건 포지션에 반영
+    if (true) { // 항상 국내 조회 (KR / BOTH / US 관계없이)
       try {
         const res = await fetch('/api/kis/balance', {
           method: 'POST',
@@ -2523,9 +2522,8 @@ async function syncKisPositions() {
       }
     }
 
-    // ── BOTH 모드: KR → US 순차 처리 (토큰 재발급 방지) ─────────
-    // 동일 토큰을 재사용하므로 지연 불필요. Rate Limit이면 US도 건너뜀
-    if (tokenRateLimited && market === 'BOTH') {
+    // ── 국내 조회 후 토큰 Rate Limit이면 미국도 건너뜀 ────────────
+    if (tokenRateLimited) {
       addLog('warn', `   ⏳ 토큰 Rate Limit — 미국 조회도 건너뜀. 1분 후 자동 재시도합니다.`);
       // 1분 후 자동 재시도 (포지션 유지 상태로)
       setTimeout(() => {
@@ -2538,7 +2536,8 @@ async function syncKisPositions() {
     }
 
     // ── 미국주식 보유종목 조회 ─────────────────────────────────
-    if (market === 'US' || market === 'BOTH') {
+    // ⚠️ 재접속 시 항상 미국도 조회 (국내 설정이어도 KIS에 미국 보유 있으면 반영)
+    if (true) { // 항상 미국 조회
       try {
         const res = await fetch('/api/kis/us/balance', {
           method: 'POST',
