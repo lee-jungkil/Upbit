@@ -2422,11 +2422,14 @@ function renderPositions() {
 
   el.innerHTML = STATE.positions.map(pos => {
     const ep        = EXIT_PARAMS[STATE.strategy] || EXIT_PARAMS.scalping;
+    const isUs      = pos.market === 'US';
     const netPnl    = pos.pnlPct - 0.245;
     const isProfit  = netPnl >= 0;
     const holdMin   = Math.floor((Date.now() - pos.entryTime) / 60000);
     const holdSec   = Math.floor(((Date.now() - pos.entryTime) % 60000) / 1000);
-    const pnlAmt    = Math.round(pos.entryPrice * pos.qty * netPnl / 100);
+    // 미국주식: 달러→원화 환산 손익 표시
+    const pnlAmtRaw = pos.entryPrice * pos.qty * netPnl / 100;
+    const pnlAmt    = isUs ? Math.round(pnlAmtRaw * (STATE.usdKrw || 1380)) : Math.round(pnlAmtRaw);
     const bar       = Math.min(Math.abs(pos.pnlPct) / STATE.config.profitTarget * 100, 100);
     const peakPnl   = pos.peakPnl || 0;
     const dropFromPeak = peakPnl - pos.pnlPct;
@@ -2456,12 +2459,12 @@ function renderPositions() {
             ${pos.pnlPct >= 0 ? '+' : ''}${pos.pnlPct.toFixed(2)}%
           </div>
           <div class="text-xs ${isProfit ? 'text-green-500' : 'text-red-500'}">
-            ${pnlAmt >= 0 ? '+' : ''}${fmtPrice(pnlAmt)}원
+            ${pnlAmt >= 0 ? '+' : ''}${fmtPrice(pnlAmt)}원${isUs ? ` (~$${(pnlAmtRaw >= 0 ? '+' : '')}${pnlAmtRaw.toFixed(2)})` : ''}
           </div>
         </div>
       </div>
       <div class="text-xs text-gray-500 flex justify-between">
-        <span>진입 ${fmtPrice(pos.entryPrice)} → 현재 ${fmtPrice(pos.currentPrice)}</span>
+        <span>진입 ${isUs ? '$' : ''}${isUs ? pos.entryPrice.toFixed(2) : fmtPrice(pos.entryPrice)} → 현재 ${isUs ? '$' : ''}${isUs ? (pos.currentPrice || 0).toFixed(2) : fmtPrice(pos.currentPrice)}</span>
         <span>${holdMin}분 ${holdSec}초</span>
       </div>
       ${peakPnl > 0 ? `<div class="text-xs text-gray-600 mt-0.5">고점 +${peakPnl.toFixed(2)}% | 슬리피지 -${ep.slippagePct}%</div>` : ''}
@@ -2600,6 +2603,9 @@ async function syncKisPositions() {
           syncKisPositions();
         }
       }, 62000);
+      // ✅ 기존 포지션 그대로 화면에 표시
+      renderPositions();
+      updateStatsUI();
       return; // 기존 포지션 그대로 유지
     }
 

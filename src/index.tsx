@@ -26,12 +26,16 @@ app.get('/favicon.ico', (c) => c.redirect('/favicon.svg', 301))
 const _tokenCache: Map<string, { token: string; exp: number }> = new Map()
 // ── 토큰 발급 진행 중인 Promise 뮤텍스 (동일 키로 동시 요청 시 중복 발급 방지)
 const _tokenInflight: Map<string, Promise<{ token: string; error?: string; networkError?: boolean }>> = new Map()
+// ── 마지막 토큰 발급 시각 (KIS 1분 1회 제한 — 너무 빠른 재발급 방지)
+const _tokenLastIssued: Map<string, number> = new Map()
+const TOKEN_ISSUE_COOLDOWN_MS = 62000 // 62초 (KIS 1분 제한 + 여유 2초)
 
 /** 토큰 캐시 무효화 (rt_cd='1' 토큰 만료 시 호출) */
 function invalidateKisToken(appKey: string) {
   const cacheKey = 'kis_token_' + appKey.slice(-8)
   _tokenCache.delete(cacheKey)
   _tokenInflight.delete(cacheKey) // 진행 중인 요청도 제거
+  // 마지막 발급 시각은 유지 — 재발급도 쿨다운 적용
 }
 
 async function getKisToken(env: Bindings & Record<string, string>, appKey: string, appSecret: string): Promise<{ token: string; error?: string; networkError?: boolean }> {
@@ -54,6 +58,13 @@ async function getKisToken(env: Bindings & Record<string, string>, appKey: strin
   const inflight = _tokenInflight.get(cacheKey)
   if (inflight) return inflight
 
+  // 4) KIS 토큰 발급 1분 1회 제한 — 마지막 발급 후 62초 이내면 에러 반환 (재발급 차단)
+  const lastIssued = _tokenLastIssued.get(cacheKey)
+  if (lastIssued && (Date.now() - lastIssued) < TOKEN_ISSUE_COOLDOWN_MS) {
+    const waitSec = Math.ceil((TOKEN_ISSUE_COOLDOWN_MS - (Date.now() - lastIssued)) / 1000)
+    return { token: '', error: `KIS 인증 오류: 접근토큰 발급 잠시 후 다시 시도하세요(1분당 1회) [서버 쿨다운 ${waitSec}초 남음]`, networkError: false }
+  }
+
   const issuePromise = (async (): Promise<{ token: string; error?: string; networkError?: boolean }> => {
     try {
       const res = await fetch('https://openapi.koreainvestment.com:9443/oauth2/tokenP', {
@@ -70,6 +81,8 @@ async function getKisToken(env: Bindings & Record<string, string>, appKey: strin
       const data: any = await res.json()
       if (!res.ok || !data.access_token) {
         // KIS 서버에 도달했으나 인증 실패 (잘못된 키 등) → networkError=false
+        // ⚠️ Rate Limit 응답이라도 쿨다운 기록 (동일 에러 반복 방지)
+        _tokenLastIssued.set(cacheKey, Date.now())
         const kisMsg = data.error_description || data.msg1 || data.message || JSON.stringify(data).slice(0, 120)
         return { token: '', error: `KIS 인증 오류: ${kisMsg}`, networkError: false }
       }
@@ -81,6 +94,8 @@ async function getKisToken(env: Bindings & Record<string, string>, appKey: strin
       }
       // 인메모리에도 저장 (KV 없을 때 폴백 — 22.5시간 TTL)
       _tokenCache.set(cacheKey, { token, exp: Date.now() + 82800 * 1000 })
+      // ✅ 발급 성공 시각 기록 (1분 쿨다운 기준점)
+      _tokenLastIssued.set(cacheKey, Date.now())
 
       return { token }
     } catch (e: any) {
