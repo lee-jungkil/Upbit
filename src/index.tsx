@@ -638,6 +638,34 @@ app.post('/api/kis/us/order', async (c) => {
                    : (rawCd === 'NYS' || rawCd === 'NYSE') ? 'NYSE'
                    : rawCd
 
+      // ── 서버 시간 검증: 장외 시간 주문 차단 ────────────────────────────
+      // KST = UTC+9 기준으로 계산
+      const nowKst = new Date(Date.now() + 9 * 3600 * 1000)
+      const hhmm = nowKst.getUTCHours() * 100 + nowKst.getUTCMinutes()
+      const kstDay = nowKst.getUTCDay() // 0=일, 6=토
+
+      // 미국 정규장 여부 (서머타임 기준 22:30~05:00 KST, 표준시 23:30~06:00)
+      const kstMin = nowKst.getUTCHours() * 60 + nowKst.getUTCMinutes()
+      const isUsRegularSession = (() => {
+        if (kstDay === 0) return false  // 일요일
+        if (kstDay >= 1 && kstDay <= 5) return kstMin >= 22 * 60 + 30 || kstMin < 5 * 60
+        if (kstDay === 6) return kstMin < 5 * 60  // 토요일 새벽 (금요일 마감 전)
+        return false
+      })()
+      // 프리마켓 여부: 18:00~22:29 KST
+      const isPremarket = (hhmm >= 1800 && hhmm < 2230)
+      // 주간거래 여부: 10:00~17:59 KST (미국 기업 발표 등)
+      const isDaytime = (hhmm >= 1000 && hhmm < 1800)
+
+      // 정규장/프리마켓/주간거래 모두 아닌 경우 = 진짜 장외 시간 → 매수 차단
+      // 매도(청산)는 장외에서도 허용 (손절/트레일 청산 목적)
+      if (side === 'buy' && !isUsRegularSession && !isPremarket && !isDaytime) {
+        return c.json({
+          error: `미국주식 장외 시간 매수 차단 [KST ${String(nowKst.getUTCHours()).padStart(2,'0')}:${String(nowKst.getUTCMinutes()).padStart(2,'0')} hhmm=${hhmm}]`,
+          hhmm, kstDay, isUsRegularSession, isPremarket, isDaytime,
+        }, 400)
+      }
+
       // ── tr_id 시간대 분기 (서머타임 대응) ──────────────────────────────
       // 서머타임(EDT, 3~11월): 미국 정규장 22:30~05:00 KST
       // 표준시  (EST, 11~3월): 미국 정규장 23:30~06:00 KST
@@ -647,9 +675,7 @@ app.post('/api/kis/us/order', async (c) => {
       //
       // ✅ 22:30 기준으로 TTTT 사용 → 서머타임(현재 8~10월) 완벽 대응
       //    표준시 22:30~23:29에 TTTT 전송 시 KIS 에러 → catch→false → 포지션 유지(안전)
-      const nowKst = new Date(Date.now() + 9 * 3600 * 1000)
-      const hhmm = nowKst.getUTCHours() * 100 + nowKst.getUTCMinutes()
-      const isPremarket = (hhmm >= 1800 && hhmm < 2230)  // 프리마켓: 18:00~22:29
+      // (nowKst, hhmm, isPremarket은 위 시간 검증 블록에서 이미 선언됨)
 
       let trId: string
       if (isPremarket) {

@@ -1375,10 +1375,19 @@ async function runScan() {
   // 1) 포지션 청산 체크 — 장 외에도 실행 (손절·트레일 보호)
   await checkPositionsForExit();
 
-  // 2) 신규 진입 — 정규장 시간에만 허용 (페이퍼 모드는 항상)
-  const canEnter = STATE.mode === 'paper' || anyOpen;
-  if (!canEnter) {
+  // 2) 신규 진입 — 정규장 시간 + 마감 30분 전이 아닐 때만 허용 (페이퍼 모드는 항상)
+  const closingKr = (mkt === 'KR' || mkt === 'BOTH') && isKrMarketClosingSoon();
+  const closingUs = (mkt === 'US' || mkt === 'BOTH') && isUsMarketClosingSoon();
+  const closingSoon = STATE.mode === 'live' && (closingKr || closingUs);
+  const canEnter = canEnterNewPosition();
+
+  if (!anyOpen && STATE.mode === 'live') {
     addLog('scan', `   ⏸️  장 외 시간 — 신규 진입 차단 (${getNextOpenStr()} 개장 예정)`);
+  } else if (closingSoon) {
+    const whoClose = closingKr && closingUs ? '국내+미국' : closingKr ? '국내' : '미국';
+    addLog('scan', `   ⏰ [${whoClose}] 장 마감 30분 전 — 신규 매수 차단 (청산 체크만 실행)`);
+  } else if (!canEnter && STATE.mode === 'live') {
+    addLog('scan', `   ⏸️  진입 불가 — 장 외 또는 마감 임박`);
   } else if (STATE.positions.length < STATE.config.maxPositions) {
     await scanForEntries();
   } else {
@@ -1678,16 +1687,17 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
 // 신규 진입 스캔
 async function scanForEntries() {
   const mkt = STATE.market;
+  const isPaper = STATE.mode === 'paper';
   let candidates = [];
 
   if (mkt === 'KR') {
-    // 국내만
-    if (isKrMarketOpen() || STATE.mode === 'paper') {
+    // 국내만 — 마감 30분 전 신규 매수 차단
+    if ((isKrMarketOpen() && !isKrMarketClosingSoon()) || isPaper) {
       candidates = await generateKrCandidates();
     }
   } else if (mkt === 'US') {
-    // 미국만
-    if (isUsMarketOpen() || STATE.mode === 'paper') {
+    // 미국만 — 마감 30분 전 신규 매수 차단
+    if ((isUsMarketOpen() && !isUsMarketClosingSoon()) || isPaper) {
       candidates = await generateUsCandidates();
     }
   } else { // BOTH — 국내/미국 각 100% 독립 (시간대 다름, 자본 분리 불필요)
@@ -1695,11 +1705,13 @@ async function scanForEntries() {
     const krPosCount = STATE.positions.filter(p => p.market !== 'US').length;
     const usPosCount = STATE.positions.filter(p => p.market === 'US').length;
 
-    if ((isKrMarketOpen() || STATE.mode === 'paper') && krPosCount < maxPos) {
+    // 국내: 정규장 + 마감 30분 전 아닐 때만
+    if (((isKrMarketOpen() && !isKrMarketClosingSoon()) || isPaper) && krPosCount < maxPos) {
       const krCands = await generateKrCandidates();
       candidates.push(...krCands.slice(0, maxPos - krPosCount));
     }
-    if ((isUsMarketOpen() || STATE.mode === 'paper') && usPosCount < maxPos) {
+    // 미국: 정규장 + 마감 30분 전 아닐 때만
+    if (((isUsMarketOpen() && !isUsMarketClosingSoon()) || isPaper) && usPosCount < maxPos) {
       const usCands = await generateUsCandidates();
       candidates.push(...usCands.slice(0, maxPos - usPosCount));
     }
@@ -2166,13 +2178,11 @@ async function tickPositions() {
   //   - 미국장(23:30~06:00 KST): 미국 달러 잔고만 조회 → KIS US API 사용
   //   - 장외시간(그 외): 마지막 조회 캐시 유지, 60초마다 각자 담당 API만 폴링
   if (STATE.mode === 'live' && KEYS.appKey && KEYS.accountNo) {
-    const krOpen = isKrMarketOpen();         // 09:00~15:30 기준 (여기선 08:50부터 허용)
-    const usOpen = isUsMarketOpen();         // 23:30~06:00
-    const now = new Date();
-    const nowMin = now.getHours() * 60 + now.getMinutes();
-    const day = now.getDay();
-    // 국내장 전 준비 포함: 08:50~15:30 (평일)
-    const krSessionActive = (day >= 1 && day <= 5) && (nowMin >= 8 * 60 + 50) && (nowMin <= 15 * 60 + 30);
+    const krOpen = isKrMarketOpen();         // KST 09:00~15:30
+    const usOpen = isUsMarketOpen();         // KST 22:30~05:00 (서머타임)
+    const { day: kstDay, min: nowMin } = nowKST();
+    // 국내장 전 준비 포함: 08:50~15:30 (평일 KST)
+    const krSessionActive = (kstDay >= 1 && kstDay <= 5) && (nowMin >= 8 * 60 + 50) && (nowMin < 15 * 60 + 30);
     // 미국장 세션: isUsMarketOpen() 그대로
     const usSessionActive = usOpen;
 
@@ -3150,59 +3160,82 @@ async function loadVolumeRank() {
 // ─── 장 시간 판별 ─────────────────────────────────────────────
 // 모든 시간은 브라우저 로컬 시간 기준 (한국 사용자 = KST)
 
+/**
+ * ── 시장 시간 판단 유틸 ────────────────────────────────────────────
+ * 모든 함수는 브라우저 타임존에 무관하게 명시적 KST(UTC+9) 기준으로 계산.
+ * new Date().getHours()는 브라우저 로컬 시간에 의존하므로 사용하지 않음.
+ */
+
+/** UTC → KST 변환: { day, h, m, min } 반환 */
+function nowKST() {
+  const now = new Date();
+  // UTC 밀리초 + 9시간 → KST Date 객체
+  const kst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+  // KST 기준 요일 (0=일, 1=월 ... 6=토)
+  const day = kst.getUTCDay();
+  const h   = kst.getUTCHours();
+  const m   = kst.getUTCMinutes();
+  return { day, h, m, min: h * 60 + m };
+}
+
 /** 국내 정규장 여부 (평일 09:00~15:30 KST) */
 function isKrMarketOpen() {
-  const now = new Date();
-  const day = now.getDay();
+  const { day, min } = nowKST();
   if (day === 0 || day === 6) return false;
-  const min = now.getHours() * 60 + now.getMinutes();
-  return min >= 9 * 60 && min <= 15 * 60 + 30;
+  return min >= 9 * 60 && min < 15 * 60 + 30;
 }
 
-/** 국내 장 마감 30분 전 여부 (15:00~15:30 KST) */
+/** 국내 장 마감 30분 전 여부 (15:00~15:30 KST) — 신규 진입 차단 기준 */
 function isKrMarketClosingSoon() {
-  const now = new Date();
-  const day = now.getDay();
+  const { day, min } = nowKST();
   if (day === 0 || day === 6) return false;
-  const min = now.getHours() * 60 + now.getMinutes();
-  return min >= 15 * 60 && min <= 15 * 60 + 30;
+  return min >= 15 * 60 && min < 15 * 60 + 30;
 }
 
-/** 미국 정규장 여부 (서머타임 대응 포함)
- *  - 표준시(EST, 11~3월): 23:30~06:00 KST
+/**
+ * 미국 정규장 여부 (KST 기준, 서머타임 대응)
  *  - 서머타임(EDT, 3~11월): 22:30~05:00 KST
- *  ⚠️ 보수적 처리: 22:30부터 장 열린 것으로 간주 (8월 등 서머타임 기간 대응)
+ *  - 표준시  (EST, 11~ 3월): 23:30~06:00 KST
+ *  ⚠️ 보수적 처리: 22:30 기준으로 통일 (서머타임 기간 = 현재 8월에 맞춤)
+ *     표준시 22:30~23:29 사이 TTTT 전송 시 KIS 에러 → 안전하게 차단됨
+ *
+ *  ✅ 반드시 KST로 계산 — 브라우저 로컬 타임존 무관
  */
 function isUsMarketOpen() {
-  const now = new Date();
-  const day = now.getDay(); // 0=일, 6=토
-  const h = now.getHours(), m = now.getMinutes();
-  const min = h * 60 + m;
-  // 일요일은 완전 마감
+  const { day, min } = nowKST();
+  // 일요일 KST: 뉴욕 토요일 낮 = 완전 마감
   if (day === 0) return false;
-  // 평일(월~금): 22:30 이후 또는 00:00~05:00 (서머타임 기준 넉넉히)
+  // 평일(월~금): KST 22:30~익일05:00
+  //   22:30 이후(당일) OR 00:00~05:00(다음날 새벽)
   if (day >= 1 && day <= 5) {
-    return min >= 22 * 60 + 30 || min <= 5 * 60;
+    return min >= 22 * 60 + 30 || min < 5 * 60;
   }
-  // 토요일: 00:00~05:00 (금요일 뉴욕장 마지막 — 서머타임 기준)
+  // 토요일 KST 00:00~05:00: 금요일 뉴욕장 마지막 시간
   if (day === 6) {
-    return min <= 5 * 60;
+    return min < 5 * 60;
   }
   return false;
 }
 
-/** 미국 장 마감 30분 전 여부 (서머타임: 04:30~05:00 / 표준시: 05:30~06:00 KST) */
+/**
+ * 미국 장 마감 30분 전 여부 — 신규 진입 차단 기준 (KST)
+ *  - 서머타임(EDT, 3~11월): 04:30~05:00 KST
+ *  - 표준시  (EST, 11~ 3월): 05:30~06:00 KST
+ *  ⚠️ 현재(8월) 서머타임: 04:30 기준 사용
+ *     표준시 기간 대비 여유: 05:30도 포함 (둘 다 커버)
+ */
 function isUsMarketClosingSoon() {
-  const now = new Date();
-  const day = now.getDay();
+  const { day, min } = nowKST();
+  // 일요일은 장 없음
   if (day === 0) return false;
-  const min = now.getHours() * 60 + now.getMinutes();
-  // 서머타임(04:30~05:00) 또는 표준시(05:30~06:00) 양쪽 모두 포함
-  return (min >= 4 * 60 + 30 && min <= 5 * 60) ||
-         (min >= 5 * 60 + 30 && min <= 6 * 60);
+  // 서머타임 마감 30분 전: 04:30~05:00 KST
+  const edtClose = min >= 4 * 60 + 30 && min < 5 * 60;
+  // 표준시 마감 30분 전: 05:30~06:00 KST
+  const estClose = min >= 5 * 60 + 30 && min < 6 * 60;
+  return edtClose || estClose;
 }
 
-/** 현재 시장 모드에서 신규 진입 가능한지 */
+/** 현재 시장 모드에서 신규 진입 가능한지 (장 마감 30분 전은 false) */
 function isMarketOpen() {
   const mkt = STATE.market;
   if (mkt === 'KR')   return isKrMarketOpen();
@@ -3211,33 +3244,49 @@ function isMarketOpen() {
   return false;
 }
 
-/** 다음 개장 시각 문자열 */
+/**
+ * 신규 매수 진입 가능 여부 — 장 마감 30분 전이면 false
+ * checkPositionsForExit(청산 체크)와 별개로 신규 진입만 차단
+ */
+function canEnterNewPosition() {
+  const mkt = STATE.market;
+  if (STATE.mode === 'paper') return true; // 페이퍼는 항상 허용
+  if (mkt === 'KR')   return isKrMarketOpen()   && !isKrMarketClosingSoon();
+  if (mkt === 'US')   return isUsMarketOpen()   && !isUsMarketClosingSoon();
+  if (mkt === 'BOTH') {
+    const krOk = isKrMarketOpen()  && !isKrMarketClosingSoon();
+    const usOk = isUsMarketOpen()  && !isUsMarketClosingSoon();
+    return krOk || usOk;
+  }
+  return false;
+}
+
+/** 다음 개장 시각 문자열 (KST 기준) */
 function getNextOpenStr() {
-  const now = new Date();
+  const { day, min } = nowKST();
   const mkt = STATE.market;
   if (mkt === 'US') {
-    // 다음 미국 야간 정규장: 당일 23:30 또는 다음 평일 23:30
-    const day = now.getDay();
-    const min = now.getHours() * 60 + now.getMinutes();
+    // 다음 미국 야간 정규장: 당일 KST 22:30 또는 다음 평일 22:30
+    const kstNow = new Date(new Date().getTime() + 9 * 3600 * 1000);
     let daysAdd = 0;
-    // 이미 당일 23:30 이전이면 오늘 23:30
-    if (min < 23 * 60 + 30 && day >= 1 && day <= 5) daysAdd = 0;
-    // 아니면 다음날
+    // 평일 + 아직 22:30 전이면 오늘 22:30
+    if (min < 22 * 60 + 30 && day >= 1 && day <= 5) daysAdd = 0;
     else daysAdd = 1;
-    // 일~금 → 다음 평일
-    const next = new Date(now);
-    next.setDate(next.getDate() + daysAdd);
+    const next = new Date(kstNow);
+    next.setUTCDate(next.getUTCDate() + daysAdd);
     // 주말 건너뜀
-    while (next.getDay() === 0 || next.getDay() === 6) next.setDate(next.getDate() + 1);
-    next.setHours(23, 30, 0, 0);
-    return `${String(next.getMonth()+1).padStart(2,'0')}/${String(next.getDate()).padStart(2,'0')} 23:30`;
+    while (next.getUTCDay() === 0 || next.getUTCDay() === 6) next.setUTCDate(next.getUTCDate() + 1);
+    const mo = String(next.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(next.getUTCDate()).padStart(2, '0');
+    return `${mo}/${dd} 22:30`;
   }
-  // 국내 기본
-  const d = now.getDay();
-  const next = new Date(now);
-  next.setDate(next.getDate() + (d === 0 ? 1 : d === 6 ? 2 : 1));
-  next.setHours(9, 0, 0, 0);
-  return `${String(next.getMonth()+1).padStart(2,'0')}/${String(next.getDate()).padStart(2,'0')} 09:00`;
+  // 국내 기본: 다음 평일 09:00 KST
+  const kstNow = new Date(new Date().getTime() + 9 * 3600 * 1000);
+  const next = new Date(kstNow);
+  next.setUTCDate(next.getUTCDate() + (day === 0 ? 1 : day === 6 ? 2 : 1));
+  const mo = String(next.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(next.getUTCDate()).padStart(2, '0');
+  return `${mo}/${dd} 09:00`;
 }
 
 function updateMarketStatus() {
@@ -3248,15 +3297,19 @@ function updateMarketStatus() {
   const mkt = STATE.market;
   const krOpen = isKrMarketOpen();
   const usOpen = isUsMarketOpen();
-  const now = new Date();
-  const h = now.getHours(), m = now.getMinutes();
-  const day = now.getDay();
+  const krClosing = isKrMarketClosingSoon();
+  const usClosing = isUsMarketClosingSoon();
+  const { h, m: min, day } = nowKST(); // KST 기준
   const isWeekday = day >= 1 && day <= 5;
 
   if (mkt === 'KR') {
-    const preOpen  = isWeekday && h === 8 && m >= 30;
-    const afterHour= isWeekday && ((h === 15 && m > 30) || (h >= 16 && h < 18));
-    if (krOpen) {
+    const preOpen  = isWeekday && h === 8 && min >= 30;
+    const afterHour= isWeekday && ((h === 15 && min > 30) || (h >= 16 && h < 18));
+    if (krOpen && krClosing) {
+      dot.className = 'w-2 h-2 rounded-full bg-yellow-400 running-indicator';
+      label.textContent = '⏰ 국내 마감 30분 전 (신규 매수 차단)';
+      label.className = 'text-yellow-400 text-sm';
+    } else if (krOpen) {
       dot.className = 'w-2 h-2 rounded-full bg-green-500 running-indicator';
       label.textContent = '🇰🇷 정규장 (09:00~15:30)';
       label.className = 'text-green-400 text-sm';
@@ -3274,9 +3327,13 @@ function updateMarketStatus() {
       label.className = 'text-gray-400 text-sm';
     }
   } else if (mkt === 'US') {
-    if (usOpen) {
+    if (usOpen && usClosing) {
+      dot.className = 'w-2 h-2 rounded-full bg-yellow-400 running-indicator';
+      label.textContent = '⏰ 미국 마감 30분 전 (신규 매수 차단)';
+      label.className = 'text-yellow-400 text-sm';
+    } else if (usOpen) {
       dot.className = 'w-2 h-2 rounded-full bg-blue-400 running-indicator';
-      label.textContent = '🇺🇸 미국 야간장 (23:30~06:00)';
+      label.textContent = '🇺🇸 미국 정규장 (22:30~05:00 KST)';
       label.className = 'text-blue-400 text-sm';
     } else {
       dot.className = 'w-2 h-2 rounded-full bg-gray-500';
@@ -3290,12 +3347,12 @@ function updateMarketStatus() {
       label.className = 'text-green-400 text-sm';
     } else if (krOpen) {
       dot.className = 'w-2 h-2 rounded-full bg-green-500 running-indicator';
-      label.textContent = '🇰🇷 국내 정규장 (미국 마감)';
-      label.className = 'text-green-400 text-sm';
+      label.textContent = krClosing ? '⏰ 국내 마감 30분 전' : '🇰🇷 국내 정규장 (미국 마감)';
+      label.className = krClosing ? 'text-yellow-400 text-sm' : 'text-green-400 text-sm';
     } else if (usOpen) {
       dot.className = 'w-2 h-2 rounded-full bg-blue-400 running-indicator';
-      label.textContent = '🇺🇸 미국 야간장 (국내 마감)';
-      label.className = 'text-blue-400 text-sm';
+      label.textContent = usClosing ? '⏰ 미국 마감 30분 전' : '🇺🇸 미국 정규장 (국내 마감)';
+      label.className = usClosing ? 'text-yellow-400 text-sm' : 'text-blue-400 text-sm';
     } else {
       dot.className = 'w-2 h-2 rounded-full bg-gray-500';
       label.textContent = `⚫ 모든 장 마감 (다음 ${getNextOpenStr()})`;
