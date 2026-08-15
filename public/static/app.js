@@ -1326,20 +1326,19 @@ async function runScan() {
   const mktLabel = { KR: '🇰🇷국내', US: '🇺🇸미국', BOTH: '🌏국내+미국' }[mkt] || mkt;
 
   // ── 장 마감 전 자동 청산 + 신규 매수 차단 ─────────────────────
+  // checkPositionsForExit()이 마감 준비 구간 감지 → 완화 파라미터로 자연 청산
+  // 여기서는 로그 안내 + 플래그 관리만 담당 (강제 즉시청산 없음)
   if (STATE.mode !== 'paper') {
 
-    // ─ [국내] 마감 1시간 전 (14:30~): 보유 포지션 청산 준비
+    // ─ [국내] 마감 1시간 전 (14:30~): 신규 매수 차단 + 완화 청산 시작 알림
     if ((mkt === 'KR' || mkt === 'BOTH') && isKrMarketPreClose() && !STATE.krPreCloseSent) {
       STATE.krPreCloseSent = true;
       const krPos = STATE.positions.filter(p => p.market === 'KR' || !p.market);
       if (krPos.length > 0) {
-        addLog('warn', `⏰ [국내] 장 마감 1시간 전 (14:30) — 보유 ${krPos.length}개 포지션 청산 시작`);
-        for (const pos of [...krPos]) {
-          await executeExit(pos, '장마감 전 청산(1h)', pos.pnlPct, 'close_eod', 0.05);
-        }
-        addLog('info', '✅ [국내] 마감 1시간 전 청산 완료 — 이후 신규 매수 차단');
+        addLog('warn', `⏰ [국내] 장 마감 1시간 전 (14:30) — 신규 매수 차단, 보유 ${krPos.length}개 완화 청산 조건 적용`);
+        addLog('info', `   트레일 발동 기준 낮춤 · 낙폭 허용 좁힘 · 이익 있으면 우선 수익 확정`);
       } else {
-        addLog('info', '⏰ [국내] 장 마감 1시간 전 (14:30) — 보유 포지션 없음, 신규 매수 차단 시작');
+        addLog('info', '⏰ [국내] 장 마감 1시간 전 (14:30) — 신규 매수 차단 시작');
       }
     }
     // 국내 장 열리면 (09:00~14:29) 플래그 초기화
@@ -1348,16 +1347,13 @@ async function runScan() {
       STATE.krCloseAlertSent = false;
     }
 
-    // ─ [미국] 마감 30분 전: 보유 포지션 청산
+    // ─ [미국] 마감 30분 전: 신규 매수 차단 + 완화 청산 시작 알림
     if ((mkt === 'US' || mkt === 'BOTH') && isUsMarketClosingSoon() && !STATE.usCloseAlertSent) {
       STATE.usCloseAlertSent = true;
       const usPos = STATE.positions.filter(p => p.market === 'US');
       if (usPos.length > 0) {
-        addLog('warn', `⏰ [미국] 장 마감 30분 전 (04:30 KST) — 보유 ${usPos.length}개 포지션 청산 시작`);
-        for (const pos of [...usPos]) {
-          await executeExit(pos, '장마감 전 청산', pos.pnlPct, 'close_eod', 0.05);
-        }
-        addLog('info', '✅ [미국] 장마감 전 청산 완료');
+        addLog('warn', `⏰ [미국] 장 마감 30분 전 (04:30 KST) — 신규 매수 차단, 보유 ${usPos.length}개 완화 청산 조건 적용`);
+        addLog('info', `   트레일 발동 기준 낮춤 · 낙폭 허용 좁힘 · 이익 있으면 우선 수익 확정`);
       }
     }
     // 미국 장 열리면 플래그 초기화
@@ -1452,7 +1448,7 @@ async function checkPositionsForExit() {
     const isUs = pos.market === 'US';
 
     // ⚠️ 미국주식 장외시간 매도 차단
-    // - 미국 정규장: 평일 23:30~06:00 KST (뉴욕 09:30~16:00)
+    // - 미국 정규장: 평일 22:30~05:00 KST (서머타임 기준)
     // - 장외시간에는 가격 갱신만 하고 매도 판단 스킵
     if (isUs && STATE.mode === 'live' && !isUsMarketOpen()) {
       const price = await fetchCurrentPrice(pos.ticker);
@@ -1461,7 +1457,6 @@ async function checkPositionsForExit() {
         pos.pnlPct = ((price - pos.entryPrice) / pos.entryPrice) * 100;
         if (pos.pnlPct > (pos.peakPnl || 0)) pos.peakPnl = pos.pnlPct;
       }
-      // 장외시간 로그는 너무 자주 찍히므로 생략 (watchdog 주기마다 출력 방지)
       continue; // 매도 판단 전체 스킵
     }
 
@@ -1479,20 +1474,42 @@ async function checkPositionsForExit() {
     const target    = STATE.config.profitTarget;
     const stopLoss  = STATE.config.stopLoss;
 
+    // ── 마감 준비 구간: 완화된 청산 파라미터로 오버라이드 ──────────
+    // 목적: 즉시 강제청산이 아니라 이익 극대화를 추구하면서 자연스럽게 청산
+    //   - 손절: 기준 그대로 (손실 보호는 동일)
+    //   - 트레일: 발동 기준 낮춤 → 작은 이익도 트레일 활성화
+    //   - 트레일 낙폭: 좁힘 → 이익을 더 타이트하게 지킴
+    //   - maxHoldSec: 0 → 진입 즉시 시간청산 조건 진입
+    //     (이익>0이면 시간청산 수익 확정, 손실이면 손절로 처리)
+    //   - timeExitMinPnl: 0 → 아주 작은 이익도 시간청산 허용
+    const isKrPreClose = !isUs && STATE.mode === 'live' && isKrMarketPreClose();
+    const isUsPreClose = isUs  && STATE.mode === 'live' && isUsMarketClosingSoon();
+    const isPreCloseMode = isKrPreClose || isUsPreClose;
+
+    const activeEp = isPreCloseMode ? {
+      ...ep,
+      // 트레일 발동 기준: 익절목표의 50%만 도달해도 트레일 활성화
+      trailTriggerMult: Math.min(ep.trailTriggerMult, 0.5),
+      // 트레일 낙폭 허용: 기존의 절반 → 이익을 타이트하게 지킴
+      trailDropPct:     Math.max(ep.trailDropPct * 0.5, 0.2),
+      // 최대 보유시간: 0초 → 이미 이익이면 바로 시간청산
+      maxHoldSec:       0,
+      // 최소 이익 기준: 0% → 아주 작은 이익도 수익 확정
+      timeExitMinPnl:   0,
+    } : ep;
+
     let exitReason = null;
     let exitType   = null; // 'profit' | 'loss' | 'trail' | 'time'
 
     // ── 1) 손절 ─────────────────────────────────────────────────
     // 🛡️ 손절 유예: 기존 보유 포지션이 이미 -stopLoss에 근접해 있으면
     //   0.5%p 추가 여유(effectiveStopLoss)를 줘서 반등 기회 부여
-    //   - 진입 직후 손절: effectiveStopLoss = stopLoss (정상 손절)
-    //   - 이미 -stopLoss×0.8 이상 손실 중: stopLoss+0.5%p 까지 대기
-    //   예) stopLoss=2.0% → -2% 도달 시 유예 발동 → -2.5% 될 때 손절
-    const stopLossBuffer = 0.5; // 유예 여유 폭 (%)
-    const stopLossExtendThreshold = stopLoss * 0.8; // 손절의 80% 이상 손실 시 유예 발동
+    //   단, 마감 준비 구간에서는 유예 없이 즉시 손절 (리스크 최소화)
+    const stopLossBuffer = isPreCloseMode ? 0 : 0.5;
+    const stopLossExtendThreshold = stopLoss * 0.8;
     const effectiveStopLoss =
-      (!pos.stopLossExtended && pnlPct <= -stopLossExtendThreshold && pnlPct > -stopLoss)
-        ? (() => { // 유예 발동: 한 번만 로그
+      (!isPreCloseMode && !pos.stopLossExtended && pnlPct <= -stopLossExtendThreshold && pnlPct > -stopLoss)
+        ? (() => {
             if (!pos._stopExtendLogged) {
               pos._stopExtendLogged = true;
               addLog('warn', `🛡️ 손절 유예: ${pos.name} ${pnlPct.toFixed(2)}% → 스탑 -${(stopLoss + stopLossBuffer).toFixed(1)}%까지 대기`);
@@ -1500,26 +1517,29 @@ async function checkPositionsForExit() {
             pos.stopLossExtended = true;
             return stopLoss + stopLossBuffer;
           })()
-        : pos.stopLossExtended
-          ? stopLoss + stopLossBuffer  // 이미 유예 중
-          : stopLoss;                  // 일반 손절
+        : pos.stopLossExtended && !isPreCloseMode
+          ? stopLoss + stopLossBuffer
+          : stopLoss;
 
     if (pnlPct <= -effectiveStopLoss) {
-      exitReason = `손절 ${pnlPct.toFixed(2)}%${pos.stopLossExtended ? ` (유예 -${effectiveStopLoss.toFixed(1)}%)` : ''}`;
+      exitReason = `손절 ${pnlPct.toFixed(2)}%${pos.stopLossExtended && !isPreCloseMode ? ` (유예 -${effectiveStopLoss.toFixed(1)}%)` : ''}`;
       exitType   = 'loss';
     }
 
     // ── 2) 트레일링 스탑 ────────────────────────────────────────
-    // 트레일 발동 조건: 익절목표 × trailTriggerMult 최초 도달
-    else if (pnlPct >= target * ep.trailTriggerMult) {
+    // 트레일 발동 조건: 익절목표 × activeEp.trailTriggerMult 최초 도달
+    // 마감 준비 구간: 기준 낮춰 작은 이익에도 트레일 발동
+    else if (pnlPct >= target * activeEp.trailTriggerMult) {
       if (!pos.trailArmed) {
         pos.trailArmed = true;
-        addLog('scan', `   🔒 트레일 발동: ${pos.name} 고점 ${pos.peakPnl.toFixed(2)}% (목표 ${target}% × ${ep.trailTriggerMult}× 돌파)`);
+        const preTag = isPreCloseMode ? ' [마감준비]' : '';
+        addLog('scan', `   🔒 트레일 발동${preTag}: ${pos.name} 고점 ${pos.peakPnl.toFixed(2)}% (기준 ${(target * activeEp.trailTriggerMult).toFixed(2)}% 돌파)`);
       }
-      // 고점에서 trailDropPct 이상 하락 시 청산
+      // 고점에서 activeEp.trailDropPct 이상 하락 시 청산
       const dropFromPeak = pos.peakPnl - pnlPct;
-      if (dropFromPeak >= ep.trailDropPct) {
-        exitReason = `트레일 청산 | 고점 +${pos.peakPnl.toFixed(2)}% → 현재 +${pnlPct.toFixed(2)}% (${dropFromPeak.toFixed(2)}%p 하락)`;
+      if (dropFromPeak >= activeEp.trailDropPct) {
+        const preTag = isPreCloseMode ? ' [마감청산]' : '';
+        exitReason = `트레일 청산${preTag} | 고점 +${pos.peakPnl.toFixed(2)}% → 현재 +${pnlPct.toFixed(2)}% (${dropFromPeak.toFixed(2)}%p 하락)`;
         exitType   = 'trail';
       }
     }
@@ -1529,20 +1549,24 @@ async function checkPositionsForExit() {
     // → 위 2번 조건에서 trailArmed가 설정됨
 
     // ── 4) 시간 청산 ────────────────────────────────────────────
-    else if (holdSec >= ep.maxHoldSec) {
-      if (pnlPct > ep.timeExitMinPnl) {
-        exitReason = `시간청산 (${Math.round(holdSec/60)}분) +${pnlPct.toFixed(2)}%`;
+    // 마감 준비 구간: maxHoldSec=0 → 이익 있으면 즉시 수익 확정
+    //               손실 중이면 손절이 우선 처리됨 (1번)
+    else if (holdSec >= activeEp.maxHoldSec) {
+      if (pnlPct > activeEp.timeExitMinPnl) {
+        const preTag = isPreCloseMode ? ' [마감준비]' : '';
+        exitReason = `시간청산${preTag} (${Math.round(holdSec/60)}분) +${pnlPct.toFixed(2)}%`;
         exitType   = 'time';
-      } else if (pnlPct <= 0) {
-        // 손익 없거나 손실 상태로 최대 시간 초과 → 손실 최소화 청산
+      } else if (!isPreCloseMode && pnlPct <= 0) {
+        // 일반 시간 초과 + 손실: 손실 최소화 청산
         exitReason = `시간초과 청산 (${Math.round(holdSec/60)}분) ${pnlPct.toFixed(2)}%`;
         exitType   = 'time';
       }
+      // 마감 준비 구간 + 손실 중: 손절 조건(1번)에서 처리 → 여기선 패스
     }
 
     if (exitReason) {
       // 슬리피지 적용: 시장가 매도 시 불리하게 체결
-      const slippage  = ep.slippagePct;
+      const slippage  = activeEp.slippagePct;
       const netPnlPct = pnlPct - 0.245 - slippage; // 수수료 + 슬리피지 차감
       const exitOk = await executeExit(pos, exitReason, netPnlPct, exitType, slippage);
       // ✅ 실전: API 매도 성공(exitOk=true) 시에만 포지션 제거
