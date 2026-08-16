@@ -1599,7 +1599,7 @@ app.get('/', (c) => {
 
 <!-- API 설정 모달 -->
 <div id="api-modal" class="hidden fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
-  <div class="bg-gray-900 rounded-2xl p-6 w-full max-w-md border border-gray-700 space-y-4">
+  <div class="bg-gray-900 rounded-2xl p-6 w-full max-w-md border border-gray-700 space-y-4 overflow-y-auto max-h-[90vh]">
     <div class="flex items-center justify-between">
       <h3 class="text-base font-bold flex items-center gap-2"><i class="fas fa-key text-yellow-400"></i> KIS API 설정</h3>
       <button onclick="closeApiSettings()" class="text-gray-500 hover:text-white"><i class="fas fa-times"></i></button>
