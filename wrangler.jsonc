@@ -1,13 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "stockbot",
+  "name": "webapp",
   "compatibility_date": "2026-07-30",
   "pages_build_output_dir": "./dist",
-  "compatibility_flags": ["nodejs_compat"],
-  "kv_namespaces": [
-    {
-      "binding": "KV",
-      "id": "257661eeaaa445d9b956df5ffed0a32e"
-    }
-  ]
+  "compatibility_flags": ["nodejs_compat"]
 }
