@@ -327,6 +327,8 @@ const STATE = {
   usCloseAlertSent: false,   // 미국 장마감 30분 전 청산 알림 발송 여부
   // ── 내부 플래그 ────────────────────────────────────────
   _lastMarketClosedLog: 0,
+  _krWasOpen: false,         // 텔레그램 마감 리포트: 국내 장 직전 상태
+  _usWasOpen: false,         // 텔레그램 마감 리포트: 미국 장 직전 상태
 };
 
 // API 키 (로컬 스토리지 — 새로고침/탭 닫아도 유지)
@@ -355,6 +357,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   initBotChannel();       // 단일 탭 리더 채널 초기화 (다른 탭/기기 봇 시작 시 이 탭 자동 정지)
   loadSavedKeys();
   loadConfig();           // 저장된 범위 복원 or 기본값 자동 계산 포함
+  loadTelegramKeys();     // 텔레그램 설정 UI 복원
   renderStrategyConditions();
   updateMarketStatus();
   await loadTradeHistory();
@@ -1602,6 +1605,173 @@ function scheduleNextScan() {
   }, interval);
 }
 
+// ============================================================
+// ── 텔레그램 알림 (장 마감 리포트)
+// ============================================================
+
+/** localStorage에서 텔레그램 키 로드 */
+const TG = {
+  get botToken() { return localStorage.getItem('tg_bot_token') || ''; },
+  get chatId()   { return localStorage.getItem('tg_chat_id')   || ''; },
+  get enabled()  { return !!(TG.botToken && TG.chatId); },
+};
+
+/** 설정 UI → localStorage 저장 */
+function saveTelegramKeys() {
+  const tok = document.getElementById('tg-bot-token')?.value.trim();
+  const cid = document.getElementById('tg-chat-id')?.value.trim();
+  if (!tok || !cid) {
+    const el = document.getElementById('tg-test-result');
+    if (el) { el.textContent = '⚠️ Bot Token과 Chat ID를 모두 입력하세요'; el.className = 'text-xs text-center text-yellow-400 mt-2'; }
+    return;
+  }
+  localStorage.setItem('tg_bot_token', tok);
+  localStorage.setItem('tg_chat_id',   cid);
+  const el = document.getElementById('tg-test-result');
+  if (el) { el.textContent = '✅ 저장됨'; el.className = 'text-xs text-center text-green-400 mt-2'; }
+  addLog('info', '📱 텔레그램 설정 저장 완료');
+}
+
+/** 페이지 로드 시 설정 UI 마스킹 표시 */
+function loadTelegramKeys() {
+  const el1 = document.getElementById('tg-bot-token');
+  const el2 = document.getElementById('tg-chat-id');
+  if (el1 && TG.botToken) el1.value = '●●●●●●●●';
+  if (el2 && TG.chatId)   el2.value = TG.chatId;
+}
+
+/** 텔레그램 메시지 전송 (서버 프록시 경유) */
+async function sendTelegram(text) {
+  if (!TG.enabled) return false;
+  try {
+    const res = await fetch('/api/telegram/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ botToken: TG.botToken, chatId: TG.chatId, text }),
+      signal: AbortSignal.timeout(10000),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      addLog('warn', `⚠️ 텔레그램 전송 실패 — ${data.error}`);
+      return false;
+    }
+    return true;
+  } catch(e) {
+    addLog('warn', `⚠️ 텔레그램 전송 오류 — ${e?.message || e}`);
+    return false;
+  }
+}
+
+/** 테스트 전송 버튼 */
+async function testTelegram() {
+  const tok = document.getElementById('tg-bot-token')?.value.trim();
+  const cid = document.getElementById('tg-chat-id')?.value.trim();
+  const resultEl = document.getElementById('tg-test-result');
+  if (!tok || !cid || tok === '●●●●●●●●') {
+    if (resultEl) { resultEl.textContent = '⚠️ 먼저 저장을 눌러주세요'; resultEl.className = 'text-xs text-center text-yellow-400 mt-2'; }
+    return;
+  }
+  if (resultEl) { resultEl.textContent = '전송 중...'; resultEl.className = 'text-xs text-center text-gray-400 mt-2'; }
+  const ok = await sendTelegram('📈 <b>StockBot 테스트 메시지</b>\n연결이 정상적으로 설정되었습니다! ✅');
+  if (resultEl) {
+    resultEl.textContent = ok ? '✅ 전송 성공!' : '❌ 전송 실패 (토큰/Chat ID 확인)';
+    resultEl.className   = `text-xs text-center mt-2 ${ok ? 'text-green-400' : 'text-red-400'}`;
+  }
+}
+
+/**
+ * 장 마감 리포트 생성 및 전송
+ * @param {'KR'|'US'} market
+ */
+async function sendCloseReport(market) {
+  if (!TG.enabled) return;
+
+  const flag   = market === 'KR' ? '🇰🇷' : '🇺🇸';
+  const mktStr = market === 'KR' ? '국내(KRX)' : '미국(NYSE/NAS)';
+  const now    = new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+
+  // ── 오늘 해당 시장 거래 내역 필터 ──────────────────────────────
+  const today = new Date().toDateString();
+  const trades = (STATE.recentResults || []).filter(r => {
+    if (!r.closedAt) return false;
+    if (new Date(r.closedAt).toDateString() !== today) return false;
+    if (market === 'US') return r.market === 'US';
+    return r.market !== 'US';
+  });
+
+  // ── 집계 ──────────────────────────────────────────────────────
+  const total   = trades.length;
+  const wins    = trades.filter(r => r.win).length;
+  const losses  = total - wins;
+  const winRate = total > 0 ? Math.round(wins / total * 100) : 0;
+
+  // 손익금 합계 (원화 기준)
+  const totalPnlAmt = trades.reduce((sum, r) => {
+    const amt = r.pnlAmt ?? (r.pnlPct != null && r.entryAmt ? r.pnlPct / 100 * r.entryAmt : 0);
+    return sum + (amt || 0);
+  }, 0);
+
+  // 평균 손익률
+  const avgPnlPct = total > 0
+    ? trades.reduce((s, r) => s + (r.pnlPct || 0), 0) / total
+    : 0;
+
+  // 일일 손익금 (STATE.stats.dailyProfit 기반 — 전체 시장 포함)
+  const dailyPnl = STATE.stats.dailyProfit || 0;
+
+  // ── 메시지 구성 ────────────────────────────────────────────────
+  const pnlSign  = totalPnlAmt >= 0 ? '+' : '';
+  const pnlEmoji = totalPnlAmt >= 0 ? '📈' : '📉';
+  const modeTag  = STATE.mode === 'paper' ? '[페이퍼]' : '[실전]';
+
+  let msg = `${flag} <b>StockBot ${mktStr} 장 마감 리포트</b> ${modeTag}\n`;
+  msg    += `🕐 ${now} KST\n`;
+  msg    += `━━━━━━━━━━━━━━━━━━\n`;
+
+  if (total === 0) {
+    msg += `오늘 ${mktStr} 거래 없음\n`;
+  } else {
+    msg += `📊 <b>오늘 거래: ${total}건</b> (승 ${wins} / 패 ${losses})\n`;
+    msg += `🎯 승률: <b>${winRate}%</b>\n`;
+    msg += `${pnlEmoji} 손익: <b>${pnlSign}${fmtPrice(totalPnlAmt)}원</b>`;
+    if (totalPnlAmt !== 0) msg += ` (평균 ${pnlSign}${avgPnlPct.toFixed(2)}%)`;
+    msg += '\n';
+  }
+
+  // 개별 거래 내역 (최대 10건)
+  if (trades.length > 0) {
+    msg += `\n<b>📋 거래 내역</b>\n`;
+    const shown = trades.slice(-10);
+    for (const r of shown) {
+      const p   = r.pnlPct != null ? (r.pnlPct >= 0 ? '+' : '') + r.pnlPct.toFixed(2) + '%' : '-';
+      const amt = r.pnlAmt != null ? (r.pnlAmt >= 0 ? '+' : '') + fmtPrice(r.pnlAmt) + '원' : '';
+      const ico = r.win ? '✅' : '❌';
+      msg += `${ico} ${r.name || r.ticker}  ${p}${amt ? ' (' + amt + ')' : ''}\n`;
+    }
+    if (trades.length > 10) msg += `  … 외 ${trades.length - 10}건\n`;
+  }
+
+  // 오늘 전체 누적 손익
+  msg += `━━━━━━━━━━━━━━━━━━\n`;
+  msg += `💰 오늘 전체 누적: <b>${dailyPnl >= 0 ? '+' : ''}${fmtPrice(dailyPnl)}원</b>\n`;
+
+  // 현재 보유 포지션 중 해당 시장 것만
+  const openPos = STATE.positions.filter(p => market === 'US' ? p.market === 'US' : p.market !== 'US');
+  if (openPos.length > 0) {
+    msg += `\n⏳ <b>미청산 보유 ${openPos.length}개</b>\n`;
+    for (const p of openPos.slice(0, 5)) {
+      const cur  = p.currentPrice || p.entryPrice;
+      const pct  = p.entryPrice > 0 ? ((cur - p.entryPrice) / p.entryPrice * 100) : 0;
+      msg += `  • ${p.name || p.ticker}  ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%\n`;
+    }
+    if (openPos.length > 5) msg += `  … 외 ${openPos.length - 5}개\n`;
+  }
+
+  addLog('info', `📱 텔레그램 ${mktStr} 마감 리포트 전송 중...`);
+  const ok = await sendTelegram(msg);
+  if (ok) addLog('info', `✅ 텔레그램 ${mktStr} 마감 리포트 전송 완료`);
+}
+
 // ─── 메인 스캔 로직 ───────────────────────────────────────────
 async function runScan() {
   const mkt = STATE.market;
@@ -1644,6 +1814,25 @@ async function runScan() {
     }
     // 미국 장 열리면 플래그 초기화
     if (usOpen && !isUsMarketClosingSoon()) STATE.usCloseAlertSent = false;
+  }
+
+  // ── 텔레그램 마감 리포트 트리거 ─────────────────────────────────
+  // 국내: 장이 방금 닫힌 직후 1회만 (krOpen이 false로 바뀐 첫 스캔)
+  // 미국: 장이 방금 닫힌 직후 1회만 (usOpen이 false로 바뀐 첫 스캔)
+  if (TG.enabled) {
+    // 국내 마감 감지
+    if ((mkt === 'KR' || mkt === 'BOTH') && !krOpen && STATE._krWasOpen) {
+      STATE._krWasOpen = false;
+      sendCloseReport('KR');  // 비동기 — 스캔 블록 안 함
+    }
+    if (krOpen) STATE._krWasOpen = true;
+
+    // 미국 마감 감지
+    if ((mkt === 'US' || mkt === 'BOTH') && !usOpen && STATE._usWasOpen) {
+      STATE._usWasOpen = false;
+      sendCloseReport('US');
+    }
+    if (usOpen) STATE._usWasOpen = true;
   }
 
   // ─ 장 외 시간 안내 (시장별 구분 로그)
@@ -2067,7 +2256,16 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
   });
   await loadTradeHistory();
 
-  STATE.recentResults.push({ win: isWin, pnlPct: netPnlPct });
+  STATE.recentResults.push({
+    win:      isWin,
+    pnlPct:   netPnlPct,
+    pnlAmt:   profitAmtKrw,                          // 원화 손익금 (리포트용)
+    entryAmt: Math.round(pos.qty * pos.entryPrice),   // 투자금액 (리포트 폴백용)
+    ticker:   pos.ticker,
+    name:     pos.name || pos.ticker,
+    market:   pos.market || 'KR',
+    closedAt: Date.now(),                             // 청산 시각 (오늘 거래 필터용)
+  });
   if (STATE.recentResults.length > 30) STATE.recentResults.shift(); // 최대 30회 보관
   calcAdaptiveMode(); // 10회 단위 평가
   saveStats(); // #6 stats localStorage 저장 (Kelly 세션 간 연속성)

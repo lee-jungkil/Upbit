@@ -1111,6 +1111,36 @@ function getDefaultState() {
 }
 
 // ─────────────────────────────────────────────
+// 텔레그램 프록시 엔드포인트
+// 클라이언트에서 Bot Token을 직접 Telegram API에 노출하지 않도록 서버 경유
+// ─────────────────────────────────────────────
+app.post('/api/telegram/send', async (c) => {
+  try {
+    const { botToken, chatId, text } = await c.req.json()
+    if (!botToken || !chatId || !text) {
+      return c.json({ ok: false, error: 'botToken, chatId, text 필요' }, 400)
+    }
+    const url = `https://api.telegram.org/bot${botToken}/sendMessage`
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: 'HTML',
+      }),
+    })
+    const data: any = await res.json()
+    if (!data.ok) {
+      return c.json({ ok: false, error: data.description || '텔레그램 전송 실패' }, 400)
+    }
+    return c.json({ ok: true })
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || '서버 오류' }, 500)
+  }
+})
+
+// ─────────────────────────────────────────────
 // 메인 페이지
 // ─────────────────────────────────────────────
 app.get('/', (c) => {
@@ -1624,6 +1654,38 @@ app.get('/', (c) => {
     </div>
     <div id="api-test-result" class="text-xs text-center text-gray-500"></div>
   </div>
+</div>
+
+<!-- ── 텔레그램 알림 설정 ─────────────────────────────────── -->
+<div class="bg-gray-900 rounded-xl p-4 border border-gray-700 mt-4">
+  <h3 class="text-sm font-semibold text-gray-300 mb-3">
+    <i class="fab fa-telegram text-blue-400 mr-2"></i>텔레그램 알림 설정
+  </h3>
+  <p class="text-xs text-gray-500 mb-3">장 마감 시 거래내역·손익 리포트를 텔레그램으로 받습니다.<br>
+    ① <a href="https://t.me/BotFather" target="_blank" class="underline text-blue-400">@BotFather</a>에서 봇 생성 → 토큰 복사<br>
+    ② <a href="https://t.me/userinfobot" target="_blank" class="underline text-blue-400">@userinfobot</a>에서 Chat ID 확인
+  </p>
+  <div class="space-y-2">
+    <div>
+      <label class="text-xs text-gray-400 mb-1 block">Bot Token</label>
+      <input id="tg-bot-token" type="password" placeholder="예: 1234567890:ABCDEFGabcdefg..."
+        class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+    </div>
+    <div>
+      <label class="text-xs text-gray-400 mb-1 block">Chat ID</label>
+      <input id="tg-chat-id" type="text" placeholder="예: 123456789"
+        class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+    </div>
+  </div>
+  <div class="flex gap-2 mt-3">
+    <button onclick="testTelegram()" class="flex-1 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm transition">
+      <i class="fas fa-paper-plane mr-1"></i> 테스트 전송
+    </button>
+    <button onclick="saveTelegramKeys()" class="flex-1 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm transition">
+      <i class="fas fa-save mr-1"></i> 저장
+    </button>
+  </div>
+  <div id="tg-test-result" class="text-xs text-center text-gray-500 mt-2"></div>
 </div>
 
 <script src="/static/app.1786644026.js"></script>
