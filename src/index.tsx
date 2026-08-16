@@ -972,6 +972,38 @@ app.post('/api/kis/kr/price', async (c) => {
   return fetchPrice()
 })
 
+// ── 종목명 검색: 한글/영문 → 종목코드 목록 반환 (네이버 자동완성 활용)
+// POST /api/kis/kr/search  { query: '삼성전자' }
+app.post('/api/kis/kr/search', async (c) => {
+  const body  = await c.req.json().catch(() => ({}))
+  const query = (body.query || '').trim()
+  if (!query) return c.json({ ok: false, error: 'query required' }, 400)
+
+  try {
+    // 네이버 증권 자동완성 API (인증 불필요)
+    const url = `https://ac.stock.naver.com/ac?q=${encodeURIComponent(query)}&target=stock,index,fund,etf`
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.naver.com/' },
+      signal: AbortSignal.timeout(5000),
+    })
+    if (!res.ok) throw new Error(`naver ac ${res.status}`)
+    const data: any = await res.json()
+    // 응답: { items: [{code, name, typeCode(KOSPI/KOSDAQ), ...}, ...] }
+    const items = data?.items || []
+    const results = items
+      .filter((it: any) => it.code && it.name && it.category === 'stock')
+      .slice(0, 10)
+      .map((it: any) => ({
+        code:   String(it.code).padStart(6, '0'),
+        name:   String(it.name),
+        market: String(it.typeCode || it.typeName || ''),
+      }))
+    return c.json({ ok: true, results })
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || 'search failed' }, 500)
+  }
+})
+
 // ── 네이버 금융 프록시: 현재가 (API 키 불필요 — 폴백용으로 유지)
 app.get('/api/naver/price/:code', async (c) => {
   const data = await naverGetPrice(c.req.param('code'))

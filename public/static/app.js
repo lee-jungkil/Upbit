@@ -1953,7 +1953,7 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
         // 🔍 3초 후 체결 확인 (비동기 — 메인 흐름 블록 안 함)
         if (data.ordNo) {
           const _ordNo = data.ordNo, _ticker = pos.ticker;
-          setTimeout(() => checkFillStatus('US', _ordNo, _ticker), 3000);
+          setTimeout(() => checkFillStatus('US', _ordNo, _ticker, 'sell'), 3000);
         }
       } else {
         // 국내주식 매도
@@ -1983,7 +1983,7 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
         // 🔍 3초 후 체결 확인 (비동기)
         if (data.ordNo) {
           const _ordNo = data.ordNo, _ticker = pos.ticker;
-          setTimeout(() => checkFillStatus('KR', _ordNo, _ticker), 3000);
+          setTimeout(() => checkFillStatus('KR', _ordNo, _ticker, 'sell'), 3000);
         }
       }
     } catch(e) {
@@ -2047,6 +2047,29 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
   if (STATE.recentResults.length > 30) STATE.recentResults.shift(); // 최대 30회 보관
   calcAdaptiveMode(); // 10회 단위 평가
   saveStats(); // #6 stats localStorage 저장 (Kelly 세션 간 연속성)
+
+  // #4 잔고 자동 동기화: 실전 매도 성공 → 8초 후 실제 잔고 재조회
+  if (STATE.mode === 'live' && KEYS.appKey) {
+    setTimeout(async () => {
+      if (STATE.liveBalanceFetching) return;
+      STATE.liveBalanceFetching = true;
+      try {
+        const result = await getLiveBalance();
+        const bal = result?.balance ?? result ?? 0;
+        if (bal > 0) {
+          STATE.liveBalance         = bal;
+          STATE.liveBalanceKrwForUs = bal;
+          STATE.liveBalanceTs       = Date.now();
+          addLog('info', `💰 매도 후 잔고 동기화: ${fmtPrice(bal)}원`);
+          updateStatsUI();
+        }
+      } catch(e) { /* 무시 */ } finally {
+        STATE.liveBalanceFetching = false;
+        STATE.liveBalanceTs = Date.now();
+      }
+    }, 8000);
+  }
+
   return true; // ✅ 청산 완전 성공
 }
 
@@ -2101,11 +2124,25 @@ async function generateKrCandidates() {
   const strategy = document.getElementById('strategy-select').value || STATE.strategy;
   const ap = (ADAPTIVE_PARAMS[strategy] || ADAPTIVE_PARAMS.scalping)[STATE.adaptiveMode];
 
-  // ── Step 1: 거래량 순위 30개 조회 (네이버 프록시) ────────────────
+  // ── Step 1: 거래량 순위 조회 (KOSPI + KOSDAQ 병렬) ──────────────
   let rankStocks = [];
   try {
-    const res = await axios.get('/api/naver/volume-rank?market=KOSPI&top=30', { timeout: 10000 });
-    rankStocks = res.data?.stocks || [];
+    const [kospiRes, kosdaqRes] = await Promise.allSettled([
+      axios.get('/api/naver/volume-rank?market=KOSPI&top=30',  { timeout: 10000 }),
+      axios.get('/api/naver/volume-rank?market=KOSDAQ&top=30', { timeout: 10000 }),
+    ]);
+    const kospiList  = kospiRes.status  === 'fulfilled' ? (kospiRes.value.data?.stocks  || []) : [];
+    const kosdaqList = kosdaqRes.status === 'fulfilled' ? (kosdaqRes.value.data?.stocks || []) : [];
+    if (kospiList.length === 0 && kosdaqList.length === 0) {
+      addLog('warn', '⚠️ 거래량 순위 조회 실패 — 시뮬레이션 사용');
+      return generateSimCandidates(strategy);
+    }
+    // 중복 제거 후 병합 (code 기준)
+    const seen = new Set();
+    for (const s of [...kospiList, ...kosdaqList]) {
+      if (!seen.has(s.code)) { seen.add(s.code); rankStocks.push(s); }
+    }
+    addLog('scan', `   🇰🇷 거래량 순위: KOSPI ${kospiList.length}개 + KOSDAQ ${kosdaqList.length}개 → 병합 ${rankStocks.length}개`);
   } catch(e) {
     addLog('warn', '⚠️ 거래량 순위 조회 실패 — 시뮬레이션 사용');
     return generateSimCandidates(strategy);
@@ -2524,15 +2561,16 @@ function generateUsSimCandidates(strategy, ap) {
  * @param {string}  market  'KR' | 'US'
  * @param {string}  ordNo   주문번호
  * @param {string}  ticker  종목코드
+ * @param {string}  [side]  'buy'|'sell' — pending 처리 방향
  * @returns {Promise<{status:'filled'|'partial'|'pending'|'error', ccldQty, remainQty}>}
  */
-async function checkFillStatus(market, ordNo, ticker) {
+async function checkFillStatus(market, ordNo, ticker, side = 'buy') {
   if (!KEYS.appKey || !KEYS.accountNo) return { status: 'error', reason: 'no-keys' };
   if (!ordNo) return { status: 'error', reason: 'no-ordNo' };
 
   try {
     const endpoint = market === 'US' ? '/api/kis/us/confirm' : '/api/kis/confirm';
-    const body     = {
+    const body = {
       appKey:    KEYS.appKey,
       appSecret: KEYS.appSecret,
       accountNo: KEYS.accountNo,
@@ -2554,6 +2592,49 @@ async function checkFillStatus(market, ordNo, ticker) {
     const filled = data.filled || {};
     const status = filled.status || 'pending';
     addLog('scan', `   📋 체결확인 [${market}] ${ticker} ordNo:${ordNo} → ${status} (체결:${filled.ccldQty||0}주, 잔여:${filled.remainQty||0}주)`);
+
+    // #5 미체결 처리: pending이면 10초 후 재확인 → 여전히 미체결이면 포지션 제거
+    if (status === 'pending' && side === 'buy') {
+      addLog('warn', `⏳ 미체결 감지 [${market}] ${ticker} — 10초 후 재확인 예정`);
+      setTimeout(async () => {
+        try {
+          const res2 = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...body, kisToken: getCachedKisToken() }),
+            signal: AbortSignal.timeout(8000),
+          });
+          const data2 = await res2.json();
+          const filled2 = data2?.filled || {};
+          const status2 = filled2.status || 'pending';
+          addLog('scan', `   📋 재확인 [${market}] ${ticker} ordNo:${ordNo} → ${status2}`);
+
+          if (status2 === 'pending') {
+            // 여전히 미체결 → 포지션 목록에서 제거 (미체결 매수는 실제로 보유 안 된 것)
+            const idx = STATE.positions.findIndex(p => p.ticker === ticker && p.market === market);
+            if (idx !== -1) {
+              const pos = STATE.positions[idx];
+              // 차감했던 잔고 복구
+              const investAmt = Math.round(pos.qty * pos.entryPrice);
+              if (market !== 'US') {
+                STATE.liveBalance = (STATE.liveBalance || 0) + investAmt;
+                STATE.liveBalanceKrwForUs = (STATE.liveBalanceKrwForUs || 0) + investAmt;
+              }
+              STATE.positions.splice(idx, 1);
+              savePositions();
+              addLog('warn', `🗑️ 미체결 포지션 제거 [${market}] ${ticker} — 잔고 ${fmtPrice(investAmt)}원 복구`);
+              renderPositions();
+              updateStatsUI();
+            }
+          } else if (status2 === 'filled' || status2 === 'partial') {
+            addLog('info', `✅ 체결 확인 완료 [${market}] ${ticker}: ${status2} (${filled2.ccldQty||0}주)`);
+          }
+        } catch(e2) {
+          addLog('warn', `⚠️ 미체결 재확인 오류 [${market}] ${ticker} — ${e2?.message || e2}`);
+        }
+      }, 10000);
+    }
+
     return { status, ccldQty: filled.ccldQty || 0, remainQty: filled.remainQty || 0 };
   } catch(e) {
     // 체결확인 API 자체 오류 → 비중요(매도/매수 접수는 이미 성공) → warn만
@@ -3670,10 +3751,45 @@ function updateProfitChart() {
 
 // ─── 종목 스캐너 UI ───────────────────────────────────────────
 async function lookupStock() {
-  const ticker = document.getElementById('ticker-input').value.trim().replace(/\s/g, '');
-  if (!ticker || ticker.length < 4) { addLog('warn', '⚠️ 올바른 종목코드를 입력하세요'); return; }
+  const input  = document.getElementById('ticker-input').value.trim().replace(/\s/g, '');
+  if (!input) { addLog('warn', '⚠️ 종목코드 또는 종목명을 입력하세요'); return; }
 
   const el = document.getElementById('scanner-result');
+
+  // #8 종목명 검색: 숫자 6자리가 아닌 입력 → 종목명 검색 분기
+  const isCode = /^\d{4,6}$/.test(input);
+  if (!isCode) {
+    // 한글/영문 → 종목명 검색
+    el.innerHTML = '<div class="col-span-full text-gray-500 text-sm text-center py-4">🔍 종목명 검색 중...</div>';
+    try {
+      const res  = await fetch('/api/kis/kr/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: input }),
+        signal: AbortSignal.timeout(6000),
+      });
+      const data = await res.json();
+      if (data.ok && data.results && data.results.length > 0) {
+        el.innerHTML = data.results.map(r => `
+          <div class="scanner-card cursor-pointer" onclick="document.getElementById('ticker-input').value='${r.code}'; lookupStock()">
+            <div class="font-medium text-white text-xs truncate">${r.name}</div>
+            <div class="text-sm font-bold text-yellow-300 mt-0.5">${r.code}</div>
+            <div class="text-xs text-gray-500 mt-0.5">${r.market || 'KR'} · 클릭해서 조회</div>
+          </div>`).join('');
+        addLog('info', `🔍 "${input}" 검색 결과 ${data.results.length}개`);
+      } else {
+        el.innerHTML = `<div class="col-span-full text-gray-600 text-sm text-center py-4">검색 결과 없음 — "${input}"</div>`;
+        addLog('warn', `⚠️ "${input}" 검색 결과 없음`);
+      }
+    } catch(e) {
+      el.innerHTML = '<div class="col-span-full text-gray-600 text-sm text-center py-4">검색 실패 — 다시 시도하세요</div>';
+      addLog('warn', '⚠️ 종목 검색 오류: ' + (e.message || e));
+    }
+    return;
+  }
+
+  // 6자리 코드 → 현재가 조회
+  const ticker = input.padStart(6, '0');
   el.innerHTML = '<div class="col-span-full text-gray-500 text-sm text-center py-4">🔄 조회 중...</div>';
 
   // KIS 우선 조회 (API 키 있을 때), 실패 시 네이버 폴백
@@ -3728,24 +3844,39 @@ async function lookupStock() {
 
 async function loadVolumeRank() {
   const el = document.getElementById('scanner-result');
-  el.innerHTML = '<div class="col-span-full text-gray-500 text-sm text-center py-4">🔄 거래량 상위 조회 중...</div>';
+  el.innerHTML = '<div class="col-span-full text-gray-500 text-sm text-center py-4">🔄 거래량 상위 조회 중 (KOSPI+KOSDAQ)...</div>';
 
-  // 네이버 프록시로 거래량 순위 조회 (API 키 불필요)
+  // KOSPI + KOSDAQ 병렬 조회
   try {
-    const res = await axios.get('/api/naver/volume-rank?market=KOSPI&top=20', { timeout: 10000 });
-    const items = (res.data?.stocks || []).slice(0, 12);
+    const [kospiRes, kosdaqRes] = await Promise.allSettled([
+      axios.get('/api/naver/volume-rank?market=KOSPI&top=20',  { timeout: 10000 }),
+      axios.get('/api/naver/volume-rank?market=KOSDAQ&top=20', { timeout: 10000 }),
+    ]);
+    const kospiList  = kospiRes.status  === 'fulfilled' ? (kospiRes.value.data?.stocks  || []) : [];
+    const kosdaqList = kosdaqRes.status === 'fulfilled' ? (kosdaqRes.value.data?.stocks || []) : [];
+    // 중복 제거 후 병합, 거래량 기준 정렬 → 상위 12개
+    const seen = new Set();
+    const merged = [];
+    for (const s of [...kospiList, ...kosdaqList]) {
+      if (!seen.has(s.code)) { seen.add(s.code); merged.push(s); }
+    }
+    merged.sort((a, b) => (b.volume || 0) - (a.volume || 0));
+    const items = merged.slice(0, 12);
     if (items.length > 0) {
       el.innerHTML = items.map(item => {
         const pct = item.changeRate;
+        const mktTag = kosdaqList.some(k => k.code === item.code)
+          ? '<span class="text-purple-400">KOSDAQ</span>'
+          : '<span class="text-blue-400">KOSPI</span>';
         return `
         <div class="scanner-card" onclick="document.getElementById('ticker-input').value='${item.code}'; lookupStock()">
           <div class="font-medium text-white text-xs truncate">${item.name}</div>
           <div class="text-sm font-bold text-white mt-0.5">${fmtPrice(item.price)}원</div>
           <div class="${pct >= 0 ? 'text-green-400' : 'text-red-400'} text-xs">${pct >= 0 ? '+' : ''}${pct}%</div>
-          <div class="text-xs text-gray-600 mt-0.5">거래량 상위 ${item.rank}위</div>
+          <div class="text-xs text-gray-600 mt-0.5">${mktTag} · 거래량 ${item.rank}위</div>
         </div>`;
       }).join('');
-      addLog('info', `📊 거래량 상위 ${items.length}개 로드 완료 [네이버 실시간]`);
+      addLog('info', `📊 거래량 상위 ${items.length}개 로드 (KOSPI ${kospiList.length} + KOSDAQ ${kosdaqList.length}) [네이버 실시간]`);
       return;
     }
   } catch(e) {
