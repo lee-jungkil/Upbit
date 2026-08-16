@@ -1618,18 +1618,25 @@ const TG = {
 
 /** 설정 UI → localStorage 저장 */
 function saveTelegramKeys() {
-  const tok = document.getElementById('tg-bot-token')?.value.trim();
+  let tok = document.getElementById('tg-bot-token')?.value.trim();
   const cid = document.getElementById('tg-chat-id')?.value.trim();
+  // 마스킹 상태면 기존 저장값 유지
+  if (tok === '●●●●●●●●') tok = TG.botToken;
+  const el = document.getElementById('tg-test-result');
+  const showMsg = (msg, color) => {
+    if (!el) { alert(msg); return; }
+    el.textContent = msg;
+    el.className = `text-xs text-center mt-2 ${color}`;
+    el.style.display = 'block';
+  };
   if (!tok || !cid) {
-    const el = document.getElementById('tg-test-result');
-    if (el) { el.textContent = '⚠️ Bot Token과 Chat ID를 모두 입력하세요'; el.className = 'text-xs text-center text-yellow-400 mt-2'; }
+    showMsg('⚠️ Bot Token과 Chat ID를 모두 입력하세요', 'text-yellow-400');
     return;
   }
   localStorage.setItem('tg_bot_token', tok);
   localStorage.setItem('tg_chat_id',   cid);
-  const el = document.getElementById('tg-test-result');
-  if (el) { el.textContent = '✅ 저장됨'; el.className = 'text-xs text-center text-green-400 mt-2'; }
-  addLog('info', '📱 텔레그램 설정 저장 완료');
+  showMsg('✅ 저장 완료!', 'text-green-400');
+  addLog('info', '📱 텔레그램 설정 저장 완료 (Chat ID: ' + cid + ')');
 }
 
 /** 페이지 로드 시 설정 UI 마스킹 표시 */
@@ -1664,19 +1671,21 @@ async function sendTelegram(text) {
 
 /** 테스트 전송 버튼 */
 async function testTelegram() {
-  const tok = document.getElementById('tg-bot-token')?.value.trim();
-  const cid = document.getElementById('tg-chat-id')?.value.trim();
   const resultEl = document.getElementById('tg-test-result');
-  if (!tok || !cid || tok === '●●●●●●●●') {
-    if (resultEl) { resultEl.textContent = '⚠️ 먼저 저장을 눌러주세요'; resultEl.className = 'text-xs text-center text-yellow-400 mt-2'; }
+  const showMsg = (msg, color) => {
+    if (!resultEl) { alert(msg); return; }
+    resultEl.textContent = msg;
+    resultEl.className   = `text-xs text-center mt-2 ${color}`;
+    resultEl.style.display = 'block';
+  };
+  // 저장된 값 없으면 먼저 저장 유도
+  if (!TG.enabled) {
+    showMsg('⚠️ 먼저 Bot Token과 Chat ID를 입력 후 저장하세요', 'text-yellow-400');
     return;
   }
-  if (resultEl) { resultEl.textContent = '전송 중...'; resultEl.className = 'text-xs text-center text-gray-400 mt-2'; }
-  const ok = await sendTelegram('📈 <b>StockBot 테스트 메시지</b>\n연결이 정상적으로 설정되었습니다! ✅');
-  if (resultEl) {
-    resultEl.textContent = ok ? '✅ 전송 성공!' : '❌ 전송 실패 (토큰/Chat ID 확인)';
-    resultEl.className   = `text-xs text-center mt-2 ${ok ? 'text-green-400' : 'text-red-400'}`;
-  }
+  showMsg('⏳ 전송 중...', 'text-gray-400');
+  const ok = await sendTelegram('📈 <b>StockBot 테스트 메시지</b>\n✅ 텔레그램 연결 성공! 장 마감 시 리포트가 전송됩니다.');
+  showMsg(ok ? '✅ 전송 성공! 텔레그램 확인하세요' : '❌ 전송 실패 — 토큰/Chat ID를 다시 확인하세요', ok ? 'text-green-400' : 'text-red-400');
 }
 
 /**
