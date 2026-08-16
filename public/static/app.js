@@ -1744,15 +1744,17 @@ async function checkPositionsForExit() {
     const pos = STATE.positions[i];
     const isUs = pos.market === 'US';
 
-    // ⚠️ 미국주식 장외시간/공휴일 매도 완전 차단
+    // ⚠️ 미국주식 장외시간/공휴일 매도 완전 차단 (실전 + 페이퍼 모두)
     // - 미국 정규장: 평일(공휴일 제외) 22:30~05:00 KST (서머타임 기준)
     // - 장외시간/공휴일에는 가격 갱신만 하고 매도 판단 전체 스킵
-    if (isUs && STATE.mode === 'live' && !isUsMarketOpen()) {
+    // - 페이퍼 모드도 동일: 실제 체결 불가 시간에는 시뮬레이션도 차단
+    if (isUs && !isUsMarketOpen()) {
       // 장외 차단 로그 (최초 1회만)
       if (!pos._offHoursLogged) {
         pos._offHoursLogged = true;
         const reason = isUsHoliday() ? '미국 공휴일' : '미국 장외시간';
-        addLog('warn', `⏸️ ${pos.name}(${pos.ticker}) — ${reason}: 매도 차단 (정규장 재개 시 자동 재개)`);
+        const modeTag = STATE.mode === 'paper' ? '[페이퍼]' : '[실전]';
+        addLog('warn', `⏸️ ${modeTag} ${pos.name}(${pos.ticker}) — ${reason}: 매도 차단 (정규장 22:30 재개 시 자동 재개)`);
       }
       // 가격만 갱신 (PnL 추적용)
       const price = await fetchCurrentPrice(pos.ticker);
@@ -1953,6 +1955,14 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
         });
         const data = await res.json();
         if (data.serverBlocked) { addLog('warn', `⚠️ 미국 매도 서버 차단: ${pos.ticker} — 포지션 유지`); return false; }
+        // 서버 장외시간 차단 응답 → 포지션 유지 (조용히 처리, warn 로그만)
+        if (data.offHours) {
+          if (!pos._offHoursLogged) {
+            pos._offHoursLogged = true;
+            addLog('warn', `⏸️ [서버] 미국 장외시간 — ${pos.ticker} 매도 차단, 정규장(22:30) 재개 시 자동 처리`);
+          }
+          return false;
+        }
         if (!data.ok) {
           const detail = data.trId ? ` [trId:${data.trId} excd:${data.exchCd} hhmm:${data.hhmm}]` : '';
           throw new Error((data.error || JSON.stringify(data)) + detail);

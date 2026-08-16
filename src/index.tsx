@@ -668,12 +668,12 @@ app.post('/api/kis/us/order', async (c) => {
       // 주간거래 여부: 10:00~17:59 KST (미국 기업 발표 등)
       const isDaytime = (hhmm >= 1000 && hhmm < 1800)
 
-      // 정규장/프리마켓/주간거래 모두 아닌 경우 = 진짜 장외 시간 → 매수 차단
-      // 매도(청산)는 장외에서도 허용 (손절/트레일 청산 목적)
-      if (side === 'buy' && !isUsRegularSession && !isPremarket && !isDaytime) {
+      // 정규장/프리마켓/주간거래 모두 아닌 경우 = 진짜 장외 시간 → 매수/매도 모두 차단
+      // KIS는 장외시간 주문을 거부하므로 서버에서 먼저 차단
+      if (!isUsRegularSession && !isPremarket && !isDaytime) {
         return c.json({
-          error: `미국주식 장외 시간 매수 차단 [KST ${String(nowKst.getUTCHours()).padStart(2,'0')}:${String(nowKst.getUTCMinutes()).padStart(2,'0')} hhmm=${hhmm}]`,
-          hhmm, kstDay, isUsRegularSession, isPremarket, isDaytime,
+          error: `미국주식 장외 시간 주문 차단 [KST ${String(nowKst.getUTCHours()).padStart(2,'0')}:${String(nowKst.getUTCMinutes()).padStart(2,'0')} hhmm=${hhmm} side=${side}]`,
+          hhmm, kstDay, isUsRegularSession, isPremarket, isDaytime, offHours: true,
         }, 400)
       }
 
