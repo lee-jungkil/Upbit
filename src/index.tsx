@@ -895,7 +895,72 @@ app.post('/api/auth/token', async (c) => {
   return c.json({ ok: true })
 })
 
-// ── 네이버 금융 프록시: 현재가 (API 키 불필요)
+// ── KIS 국내주식 현재가 (FHKST01010100) — KIS 우선, 실패 시 네이버 폴백
+// POST /api/kis/kr/price  { appKey, appSecret, code, kisToken? }
+app.post('/api/kis/kr/price', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as any
+  const { appKey, appSecret, code, kisToken } = body
+  if (!appKey || !appSecret || !code) {
+    return c.json({ error: 'appKey, appSecret, code 필수' }, 400)
+  }
+
+  async function fetchPrice(retrying = false): Promise<Response> {
+    const { token, error: tokErr } = await getKisToken({ ...c.env } as any, appKey, appSecret, kisToken)
+    if (!token) return c.json({ error: tokErr || '토큰 발급 실패', serverBlocked: true }, 503)
+
+    const url = `https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price`
+      + `?FID_COND_MRKT_DIV_CODE=J&FID_INPUT_ISCD=${code}`
+    const res = await fetch(url, {
+      headers: {
+        'content-type': 'application/json; charset=utf-8',
+        authorization: `Bearer ${token}`,
+        appkey: appKey,
+        appsecret: appSecret,
+        tr_id: 'FHKST01010100',
+        custtype: 'P',
+      },
+      // @ts-ignore
+      signal: AbortSignal.timeout(6000),
+    })
+    const data: any = await res.json()
+    const rtCd = data?.rt_cd
+
+    // 토큰 만료 → 캐시 무효화 후 1회 재시도
+    if (rtCd === '1' && !retrying) {
+      invalidateKisToken(appKey)
+      return fetchPrice(true)
+    }
+    if (rtCd !== '0') {
+      return c.json({ error: data?.msg1 || `KIS 오류 rt_cd=${rtCd}`, rtCd, serverBlocked: false }, 400)
+    }
+    const out = data?.output || {}
+    return c.json({
+      ok: true,
+      code,
+      name: out.hts_kor_isnm || '',        // 종목명
+      price: parseFloat(out.stck_prpr || '0'),  // 현재가
+      change: parseFloat(out.prdy_vrss || '0'), // 전일 대비
+      changeRate: parseFloat(out.prdy_ctrt || '0'), // 등락률(%)
+      volume: parseInt(out.acml_vol || '0'),    // 누적거래량
+      high: parseFloat(out.stck_hgpr || '0'),   // 고가
+      low: parseFloat(out.stck_lwpr || '0'),    // 저가
+      open: parseFloat(out.stck_oprc || '0'),   // 시가
+      market: out.rprs_mrkt_kor_name || 'KR',  // 시장명
+      source: 'kis',
+    })
+  }
+
+  try {
+    return await fetchPrice()
+  } catch (e: any) {
+    // KIS 실패 시 네이버로 자동 폴백
+    const fallback = await naverGetPrice(code)
+    if ((fallback as any).ok) return c.json({ ...(fallback as any), source: 'naver_fallback' })
+    return c.json({ error: e?.message || 'KIS 현재가 조회 실패', serverBlocked: true }, 503)
+  }
+})
+
+// ── 네이버 금융 프록시: 현재가 (API 키 불필요 — 폴백용으로 유지)
 app.get('/api/naver/price/:code', async (c) => {
   const data = await naverGetPrice(c.req.param('code'))
   return c.json(data)

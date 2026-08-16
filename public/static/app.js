@@ -626,14 +626,23 @@ async function testApiConnection() {
   // 진단 로그: 어떤 키로 테스트하는지 출력
   addLog('info', `🔍 테스트 키: ${k.slice(0,4)}...${k.slice(-4)} (${k.length}자) / SECRET: ...${s.slice(-4)} (${s.length}자)`);
 
-  // ── 1단계: 네이버 프록시 테스트 (항상 가능) ──
+  // ── 1단계: KIS 현재가 테스트 (삼성전자 005930) — API 키 있을 때
   try {
-    const nr = await axios.get('/api/naver/price/005930', { timeout: 5000 });
-    if (nr.data?.ok) {
-      addLog('info', `📊 네이버 시세 연동 ✅ — 삼성전자 ${(nr.data.price||0).toLocaleString()}원`);
+    const nr = await fetch('/api/kis/kr/price', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appKey: k, appSecret: s, code: '005930' }),
+    });
+    const nd = await nr.json();
+    if (nd.ok && nd.price > 0) {
+      addLog('info', `📊 KIS 현재가 연동 ✅ — ${nd.name||'삼성전자'} ${(nd.price||0).toLocaleString()}원 [KIS 실시간]`);
+    } else {
+      // KIS 실패 → 네이버 폴백 확인
+      const fb = await axios.get('/api/naver/price/005930', { timeout: 5000 });
+      if (fb.data?.ok) addLog('info', `📊 네이버 시세 연동 ✅ — 삼성전자 ${(fb.data.price||0).toLocaleString()}원 [네이버 폴백]`);
     }
   } catch(e) {
-    addLog('warn', '⚠️ 네이버 시세 조회 실패: ' + (e.message||''));
+    addLog('warn', '⚠️ 현재가 조회 실패: ' + (e.message||''));
   }
 
   // ── 2단계: 서버 프록시 → KIS 연결 테스트 ──
@@ -2791,8 +2800,24 @@ async function fetchCurrentPrice(ticker, market) {
   if (mkt === 'US') {
     return await fetchUsCurrentPrice(ticker);
   }
-  // 국내주식
+  // 국내주식 — 실전 모드에서 KIS 우선, 실패 시 네이버 폴백
   if (STATE.mode === 'live' && KEYS.appKey) {
+    // 1) KIS FHKST01010100 시도
+    try {
+      const res = await fetch('/api/kis/kr/price', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          appKey: KEYS.appKey,
+          appSecret: KEYS.appSecret,
+          code: ticker,
+          kisToken: KEYS.kisToken || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok && data.price > 0) return data.price;
+    } catch { /* KIS 실패 → 네이버 폴백 */ }
+    // 2) 네이버 폴백
     try {
       const res = await axios.get(`/api/naver/price/${ticker}`, { timeout: 4000 });
       return res.data?.price || null;
@@ -3598,11 +3623,36 @@ async function lookupStock() {
   const el = document.getElementById('scanner-result');
   el.innerHTML = '<div class="col-span-full text-gray-500 text-sm text-center py-4">🔄 조회 중...</div>';
 
-  // 네이버 프록시로 실시간 조회 (API 키 불필요)
+  // KIS 우선 조회 (API 키 있을 때), 실패 시 네이버 폴백
   try {
-    const res = await axios.get(`/api/naver/price/${ticker}`, { timeout: 5000 });
-    const d = res.data;
-    if (d?.ok) {
+    let d = null;
+    let source = '';
+
+    if (KEYS.appKey && KEYS.appSecret) {
+      // KIS FHKST01010100
+      try {
+        const res = await fetch('/api/kis/kr/price', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            appKey: KEYS.appKey,
+            appSecret: KEYS.appSecret,
+            code: ticker,
+            kisToken: KEYS.kisToken || undefined,
+          }),
+        });
+        const kisData = await res.json();
+        if (kisData.ok && kisData.price > 0) { d = kisData; source = 'KIS'; }
+      } catch { /* 네이버 폴백 */ }
+    }
+
+    if (!d) {
+      // 네이버 폴백 (API 키 없거나 KIS 실패)
+      const res = await axios.get(`/api/naver/price/${ticker}`, { timeout: 5000 });
+      if (res.data?.ok) { d = res.data; source = '네이버'; }
+    }
+
+    if (d) {
       const pct = d.changeRate;
       el.innerHTML = `
         <div class="scanner-card col-span-2">
@@ -3612,9 +3662,9 @@ async function lookupStock() {
           </div>
           <div class="text-lg font-bold text-white mt-1">${fmtPrice(d.price)}원</div>
           <div class="${pct >= 0 ? 'text-green-400' : 'text-red-400'} text-sm">${pct >= 0 ? '+' : ''}${pct}%</div>
-          <div class="text-xs text-gray-500 mt-1">전일 대비 ${d.change >= 0 ? '+' : ''}${fmtPrice(d.change)}원</div>
+          <div class="text-xs text-gray-500 mt-1">전일 대비 ${d.change >= 0 ? '+' : ''}${fmtPrice(d.change)}원 · ${source} 실시간</div>
         </div>`;
-      addLog('info', `🔍 ${d.name || ticker}: ${fmtPrice(d.price)}원 (${pct >= 0 ? '+' : ''}${pct}%) [네이버 실시간]`);
+      addLog('info', `🔍 ${d.name || ticker}: ${fmtPrice(d.price)}원 (${pct >= 0 ? '+' : ''}${pct}%) [${source} 실시간]`);
       return;
     }
   } catch(e) {
