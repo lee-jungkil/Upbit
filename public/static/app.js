@@ -4435,15 +4435,6 @@ function updateMarketStatus() {
       label.textContent = `⚫ 장 마감 (다음 ${getNextOpenStr('KR')})`;
       label.className = 'text-gray-400 text-sm';
     }
-    } else if (afterHour) {
-      dot.className = 'w-2 h-2 rounded-full bg-blue-400';
-      label.textContent = '🔵 장 후 시간외 (15:30~18:00)';
-      label.className = 'text-blue-400 text-sm';
-    } else {
-      dot.className = 'w-2 h-2 rounded-full bg-gray-500';
-      label.textContent = `⚫ 장 마감 (다음 ${getNextOpenStr('KR')})`;
-      label.className = 'text-gray-400 text-sm';
-    }
   } else if (mkt === 'US') {
     if (usOpen && usClosing) {
       dot.className = 'w-2 h-2 rounded-full bg-yellow-400 running-indicator';
