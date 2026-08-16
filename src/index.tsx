@@ -1,17 +1,28 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { serveStatic } from 'hono/cloudflare-workers'
 
 type Bindings = {
   KV: KVNamespace
+  ASSETS: Fetcher  // Cloudflare Pages 정적 자산 바인딩
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
 
 app.use('/api/*', cors())
-app.use('/static/*', serveStatic({ root: './public' }))
 
-// favicon 직접 응답 (serveStatic manifest 오류 방지)
+// ✅ Cloudflare Pages _worker.js 환경: ASSETS 바인딩으로 정적 파일 서빙
+// _worker.js 존재 시 모든 요청이 Worker를 거치므로 ASSETS.fetch()로 정적 파일을 직접 전달
+app.use('/static/*', async (c, next) => {
+  const url = new URL(c.req.url)
+  // ASSETS 바인딩이 있으면 Cloudflare Pages 정적 자산으로 위임
+  if (c.env?.ASSETS) {
+    return c.env.ASSETS.fetch(new Request(url.toString(), c.req.raw))
+  }
+  // ASSETS 바인딩 없으면 다음 미들웨어로 패스
+  return next()
+})
+
+// favicon 직접 응답 (Workers 라우터 우선 처리)
 app.get('/favicon.svg', (c) => c.body(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">📈</text></svg>',
   200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public,max-age=86400' }
@@ -1511,4 +1522,29 @@ app.get('/', (c) => {
 </html>`)
 })
 
-export default app
+// Cloudflare Pages: ASSETS 바인딩으로 정적 파일 서빙 (API가 아닌 모든 요청에 폴백)
+export default {
+  async fetch(request: Request, env: Bindings, ctx: ExecutionContext): Promise<Response> {
+    // API + favicon 등 Worker 라우트는 Hono가 처리
+    const url = new URL(request.url)
+    const isApiOrWorkerRoute = (
+      url.pathname.startsWith('/api/') ||
+      url.pathname === '/favicon.svg' ||
+      url.pathname === '/favicon.ico' ||
+      url.pathname === '/' ||
+      url.pathname === ''
+    )
+
+    if (isApiOrWorkerRoute) {
+      return app.fetch(request, env, ctx)
+    }
+
+    // /static/*, 기타 경로 → ASSETS 바인딩으로 정적 파일 서빙
+    if (env.ASSETS) {
+      return env.ASSETS.fetch(request)
+    }
+
+    // ASSETS 없으면 Hono 라우터에서 처리
+    return app.fetch(request, env, ctx)
+  }
+}
