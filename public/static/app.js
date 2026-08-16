@@ -1555,7 +1555,10 @@ async function startBot() {
       addLog('info', `   🟢 현재 정규장 시간 — 즉시 매매 활성`);
     } else {
       addLog('warn', `   ⚫ 현재 장 외 시간 — 신규 진입 차단, 보유 포지션 청산 체크만 진행`);
-      addLog('warn', `   📅 다음 개장: ${getNextOpenStr()}`);
+      if (mkt === 'KR' || mkt === 'BOTH')
+        addLog('warn', `   📅 🇰🇷 국내 다음 개장: ${getNextOpenStr('KR')}`);
+      if (mkt === 'US' || mkt === 'BOTH')
+        addLog('warn', `   📅 🇺🇸 미국 다음 개장: ${getNextOpenStr('US')}`);
     }
   } else {
     addLog('info', `   📄 페이퍼 모드 — 장 시간 무관하게 시뮬레이션 실행`);
@@ -1643,10 +1646,17 @@ async function runScan() {
     if (usOpen && !isUsMarketClosingSoon()) STATE.usCloseAlertSent = false;
   }
 
-  // ─ 장 외 시간 안내
-  if (!anyOpen && STATE.mode === 'live') {
-    if (!STATE._lastMarketClosedLog || Date.now() - STATE._lastMarketClosedLog > 5 * 60 * 1000) {
-      addLog('warn', `⏸️  [실전] 장 외 시간 — 신규 진입 차단 (다음: ${getNextOpenStr()})`);
+  // ─ 장 외 시간 안내 (시장별 구분 로그)
+  if (STATE.mode === 'live') {
+    const now5m = Date.now() - STATE._lastMarketClosedLog > 5 * 60 * 1000;
+    // KR 모드 또는 BOTH에서 KR 닫혔을 때
+    if ((mkt === 'KR' || mkt === 'BOTH') && !krOpen && now5m) {
+      addLog('warn', `⏸️  🇰🇷 국내 장 외 시간 — 신규 진입 차단 (다음 개장: ${getNextOpenStr('KR')})`);
+      STATE._lastMarketClosedLog = Date.now();
+    }
+    // US 모드 또는 BOTH에서 US 닫혔을 때
+    if ((mkt === 'US' || mkt === 'BOTH') && !usOpen && now5m) {
+      addLog('warn', `⏸️  🇺🇸 미국 장 외 시간 — 신규 진입 차단 (다음 개장: ${getNextOpenStr('US')})`);
       STATE._lastMarketClosedLog = Date.now();
     }
   }
@@ -1670,7 +1680,11 @@ async function runScan() {
   const canEnter   = canEnterNewPosition();
 
   if (!anyOpen && STATE.mode === 'live') {
-    addLog('scan', `   ⏸️  장 외 시간 — 신규 진입 차단 (${getNextOpenStr()} 개장 예정)`);
+    // 시장별 개장 예정 시각 표시
+    const krMsg = (mkt === 'KR' || mkt === 'BOTH') ? `🇰🇷 ${getNextOpenStr('KR')}` : '';
+    const usMsg = (mkt === 'US' || mkt === 'BOTH') ? `🇺🇸 ${getNextOpenStr('US')}` : '';
+    const nextStr = [krMsg, usMsg].filter(Boolean).join(' | ');
+    addLog('scan', `   ⏸️  장 외 시간 — 신규 진입 차단 (다음 개장: ${nextStr})`);
   } else if (blocked) {
     const who = preCloseKr && closingUs ? '국내(1h)+미국(30m)' : preCloseKr ? '국내 14:30~' : '미국 04:30~';
     addLog('scan', `   ⏰ [${who}] 마감 준비 — 신규 매수 차단, 청산 체크만 실행`);
@@ -4096,28 +4110,60 @@ function canEnterNewPosition() {
 }
 
 /** 다음 개장 시각 문자열 (KST 기준) */
-function getNextOpenStr() {
+function getNextOpenStr(forMarket) {
   const { day, min } = nowKST();
-  const mkt = STATE.market;
+  // forMarket 없으면 STATE.market 기준, BOTH는 더 빨리 열리는 쪽
+  const mkt = forMarket || STATE.market;
+
   if (mkt === 'US') {
     // 다음 미국 야간 정규장: 당일 KST 22:30 또는 다음 평일 22:30
     const kstNow = new Date(new Date().getTime() + 9 * 3600 * 1000);
-    let daysAdd = 0;
-    // 평일 + 아직 22:30 전이면 오늘 22:30
-    if (min < 22 * 60 + 30 && day >= 1 && day <= 5) daysAdd = 0;
-    else daysAdd = 1;
+    // 오늘 평일이고 아직 22:30 전이면 오늘 22:30
+    const todayUsOpen = (day >= 1 && day <= 5) && min < 22 * 60 + 30;
     const next = new Date(kstNow);
-    next.setUTCDate(next.getUTCDate() + daysAdd);
+    if (!todayUsOpen) next.setUTCDate(next.getUTCDate() + 1);
     // 주말 건너뜀
     while (next.getUTCDay() === 0 || next.getUTCDay() === 6) next.setUTCDate(next.getUTCDate() + 1);
     const mo = String(next.getUTCMonth() + 1).padStart(2, '0');
     const dd = String(next.getUTCDate()).padStart(2, '0');
     return `${mo}/${dd} 22:30`;
   }
-  // 국내 기본: 다음 평일 09:00 KST
+
+  if (mkt === 'BOTH') {
+    // 더 빨리 열리는 쪽 반환
+    const kstNow = new Date(new Date().getTime() + 9 * 3600 * 1000);
+    // 오늘 KR 개장 가능? (09:00 이전 평일)
+    const todayKrOpen = (day >= 1 && day <= 5) && min < 9 * 60;
+    // 오늘 US 개장 가능? (22:30 이전 평일)
+    const todayUsOpen = (day >= 1 && day <= 5) && min < 22 * 60 + 30;
+    if (todayKrOpen) {
+      const mo = String(kstNow.getUTCMonth() + 1).padStart(2, '0');
+      const dd = String(kstNow.getUTCDate()).padStart(2, '0');
+      return `🇰🇷 ${mo}/${dd} 09:00 또는 🇺🇸 ${mo}/${dd} 22:30`;
+    }
+    if (todayUsOpen) {
+      const mo = String(kstNow.getUTCMonth() + 1).padStart(2, '0');
+      const dd = String(kstNow.getUTCDate()).padStart(2, '0');
+      return `🇺🇸 ${mo}/${dd} 22:30`;
+    }
+    // 다음 평일 09:00 KR
+    const next = new Date(kstNow);
+    next.setUTCDate(next.getUTCDate() + 1);
+    while (next.getUTCDay() === 0 || next.getUTCDay() === 6) next.setUTCDate(next.getUTCDate() + 1);
+    const mo = String(next.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(next.getUTCDate()).padStart(2, '0');
+    return `🇰🇷 ${mo}/${dd} 09:00`;
+  }
+
+  // KR 기본: 다음 평일 09:00 KST
   const kstNow = new Date(new Date().getTime() + 9 * 3600 * 1000);
+  // 오늘 평일이고 09:00 전이면 오늘 09:00
+  const todayKrOpen = (day >= 1 && day <= 5) && min < 9 * 60;
   const next = new Date(kstNow);
-  next.setUTCDate(next.getUTCDate() + (day === 0 ? 1 : day === 6 ? 2 : 1));
+  if (!todayKrOpen) {
+    next.setUTCDate(next.getUTCDate() + 1);
+    while (next.getUTCDay() === 0 || next.getUTCDay() === 6) next.setUTCDate(next.getUTCDate() + 1);
+  }
   const mo = String(next.getUTCMonth() + 1).padStart(2, '0');
   const dd = String(next.getUTCDate()).padStart(2, '0');
   return `${mo}/${dd} 09:00`;
@@ -4162,7 +4208,7 @@ function updateMarketStatus() {
       label.className = 'text-blue-400 text-sm';
     } else {
       dot.className = 'w-2 h-2 rounded-full bg-gray-500';
-      label.textContent = `⚫ 장 마감 (다음 ${getNextOpenStr()})`;
+      label.textContent = `⚫ 장 마감 (다음 ${getNextOpenStr('KR')})`;
       label.className = 'text-gray-400 text-sm';
     }
     } else if (afterHour) {
@@ -4171,7 +4217,7 @@ function updateMarketStatus() {
       label.className = 'text-blue-400 text-sm';
     } else {
       dot.className = 'w-2 h-2 rounded-full bg-gray-500';
-      label.textContent = `⚫ 장 마감 (다음 ${getNextOpenStr()})`;
+      label.textContent = `⚫ 장 마감 (다음 ${getNextOpenStr('KR')})`;
       label.className = 'text-gray-400 text-sm';
     }
   } else if (mkt === 'US') {
@@ -4185,7 +4231,7 @@ function updateMarketStatus() {
       label.className = 'text-blue-400 text-sm';
     } else {
       dot.className = 'w-2 h-2 rounded-full bg-gray-500';
-      label.textContent = `🇺🇸 미국장 마감 (다음 ${getNextOpenStr()})`;
+      label.textContent = `🇺🇸 미국장 마감 (다음 ${getNextOpenStr('US')})`;
       label.className = 'text-gray-400 text-sm';
     }
   } else { // BOTH
@@ -4209,7 +4255,7 @@ function updateMarketStatus() {
       label.className = usClosing ? 'text-yellow-400 text-sm' : 'text-blue-400 text-sm';
     } else {
       dot.className = 'w-2 h-2 rounded-full bg-gray-500';
-      label.textContent = `⚫ 모든 장 마감 (다음 ${getNextOpenStr()})`;
+      label.textContent = `⚫ 모든 장 마감 (다음 ${getNextOpenStr('BOTH')})`;
       label.className = 'text-gray-400 text-sm';
     }
   }
