@@ -1620,8 +1620,8 @@ const TG = {
 function saveTelegramKeys() {
   let tok = document.getElementById('tg-bot-token')?.value.trim();
   const cid = document.getElementById('tg-chat-id')?.value.trim();
-  // 마스킹 상태면 기존 저장값 유지
-  if (tok === '●●●●●●●●') tok = TG.botToken;
+  // 토큰 비어있으면 기존 저장값 유지
+  if (!tok) tok = TG.botToken;
   const el = document.getElementById('tg-test-result');
   const showMsg = (msg, color) => {
     if (!el) { alert(msg); return; }
@@ -1635,16 +1635,23 @@ function saveTelegramKeys() {
   }
   localStorage.setItem('tg_bot_token', tok);
   localStorage.setItem('tg_chat_id',   cid);
+  // placeholder 갱신
+  const el1 = document.getElementById('tg-bot-token');
+  if (el1) { el1.value = ''; el1.placeholder = '저장됨 (변경하려면 새로 입력)'; }
   showMsg('✅ 저장 완료!', 'text-green-400');
   addLog('info', '📱 텔레그램 설정 저장 완료 (Chat ID: ' + cid + ')');
 }
 
-/** 페이지 로드 시 설정 UI 마스킹 표시 */
+/** 페이지 로드 시 설정 UI 복원 */
 function loadTelegramKeys() {
   const el1 = document.getElementById('tg-bot-token');
   const el2 = document.getElementById('tg-chat-id');
-  if (el1 && TG.botToken) el1.value = '●●●●●●●●';
-  if (el2 && TG.chatId)   el2.value = TG.chatId;
+  // 토큰은 placeholder로 저장됨 표시 (value는 비워둬서 재입력 없이도 저장 가능)
+  if (el1) {
+    el1.value = '';
+    el1.placeholder = TG.botToken ? '저장됨 (변경하려면 새로 입력)' : '예: 1234567890:ABCDEFGabcdefg...';
+  }
+  if (el2 && TG.chatId) el2.value = TG.chatId;
 }
 
 /** 텔레그램 메시지 전송 (서버 프록시 경유) */
