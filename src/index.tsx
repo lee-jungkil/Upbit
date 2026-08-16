@@ -1687,7 +1687,7 @@ app.get('/', (c) => {
   </div>
 </div>
 
-<script src="/static/app.1786644026.js"></script>
+<script src="/static/app.js"></script>
 </body>
 </html>`)
 })
