@@ -1691,10 +1691,17 @@ async function checkPositionsForExit() {
     const pos = STATE.positions[i];
     const isUs = pos.market === 'US';
 
-    // ⚠️ 미국주식 장외시간 매도 차단
-    // - 미국 정규장: 평일 22:30~05:00 KST (서머타임 기준)
-    // - 장외시간에는 가격 갱신만 하고 매도 판단 스킵
+    // ⚠️ 미국주식 장외시간/공휴일 매도 완전 차단
+    // - 미국 정규장: 평일(공휴일 제외) 22:30~05:00 KST (서머타임 기준)
+    // - 장외시간/공휴일에는 가격 갱신만 하고 매도 판단 전체 스킵
     if (isUs && STATE.mode === 'live' && !isUsMarketOpen()) {
+      // 장외 차단 로그 (최초 1회만)
+      if (!pos._offHoursLogged) {
+        pos._offHoursLogged = true;
+        const reason = isUsHoliday() ? '미국 공휴일' : '미국 장외시간';
+        addLog('warn', `⏸️ ${pos.name}(${pos.ticker}) — ${reason}: 매도 차단 (정규장 재개 시 자동 재개)`);
+      }
+      // 가격만 갱신 (PnL 추적용)
       const price = await fetchCurrentPrice(pos.ticker);
       if (price) {
         pos.currentPrice = price;
@@ -1703,6 +1710,8 @@ async function checkPositionsForExit() {
       }
       continue; // 매도 판단 전체 스킵
     }
+    // 장이 열렸으면 차단 로그 초기화
+    if (isUs) pos._offHoursLogged = false;
 
     const currentPrice = await fetchCurrentPrice(pos.ticker);
     if (!currentPrice) continue;
@@ -2666,6 +2675,11 @@ async function executeEntry(candidate) {
     trailArmed:   false,
     score:        candidate.score,
     market:       candidate.market || 'KR', // 'KR' | 'US'
+    // ✅ 미국주식 거래소 코드 저장 — 매도 시 재추론 오류 방지
+    excd:         isUs ? (() => {
+      const raw = candidate.excd || getUsExchangeCode(candidate.ticker);
+      return (raw === 'NAS' || raw === 'NASD') ? 'NASD' : 'NYSE';
+    })() : undefined,
   };
   STATE.positions.push(pos);
   savePositions(); // 매수 즉시 localStorage 저장
@@ -3709,6 +3723,72 @@ function isKrMarketClosingSoon() {
 }
 
 /**
+ * 미국 증시 공휴일 여부 (KST 날짜 기준)
+ * KST로 오늘 날짜를 구해서 뉴욕 날짜와 맞춤
+ * ※ KST 00:00~14:59 = 전날 뉴욕 날짜 (서머타임 기준)
+ *    KST 15:00 이후  = 당일 뉴욕 날짜
+ */
+function isUsHoliday() {
+  // 뉴욕 날짜 계산: UTC - 4시간 (EDT 서머타임 3~11월)
+  //                 UTC - 5시간 (EST 표준시 11~3월)
+  const now = new Date();
+  const kst = new Date(now.getTime() + 9 * 3600 * 1000);
+  const kstMonth = kst.getUTCMonth() + 1; // 1~12
+  // 서머타임: 3월 두번째 일요일 ~ 11월 첫번째 일요일 (근사)
+  const isDST = kstMonth >= 3 && kstMonth <= 11;
+  const nyOffset = isDST ? -4 : -5;
+  const nyTime = new Date(now.getTime() + nyOffset * 3600 * 1000);
+  const m  = nyTime.getUTCMonth() + 1; // 뉴욕 월
+  const d  = nyTime.getUTCDate();      // 뉴욕 일
+  const wd = nyTime.getUTCDay();       // 뉴욕 요일 (0=일,6=토)
+
+  // 고정 공휴일 (월/일 기준)
+  // 1/1 신정, 6/19 준틴스, 7/4 독립기념일, 11/11 재향군인의날*, 12/25 크리스마스
+  // (* 재향군인의날은 주식시장 열림 → 제외)
+  const fixedHolidays = [
+    [1, 1],   // 신정 (New Year's Day)
+    [6, 19],  // 준틴스 (Juneteenth)
+    [7, 4],   // 독립기념일
+    [12, 25], // 크리스마스
+  ];
+  // 주말 전후 대체공휴일
+  // 공휴일이 토요일 → 금요일 대체
+  // 공휴일이 일요일 → 월요일 대체
+  for (const [hm, hd] of fixedHolidays) {
+    if (m === hm && d === hd && wd !== 0 && wd !== 6) return true; // 평일 당일
+    // 토요일 → 금요일 대체
+    if (m === hm && wd === 5) {
+      const nextDay = new Date(nyTime); nextDay.setUTCDate(d + 1);
+      if (nextDay.getUTCMonth() + 1 === hm && nextDay.getUTCDate() === hd) return true;
+    }
+    // 일요일 → 월요일 대체
+    if (m === hm && wd === 1) {
+      const prevDay = new Date(nyTime); prevDay.setUTCDate(d - 1);
+      if (prevDay.getUTCMonth() + 1 === hm && prevDay.getUTCDate() === hd) return true;
+    }
+  }
+
+  // 변동 공휴일 (요일 기반)
+  // MLK Day: 1월 세번째 월요일
+  if (m === 1 && wd === 1 && d >= 15 && d <= 21) return true;
+  // Presidents Day: 2월 세번째 월요일
+  if (m === 2 && wd === 1 && d >= 15 && d <= 21) return true;
+  // Memorial Day: 5월 마지막 월요일
+  if (m === 5 && wd === 1 && d >= 25) return true;
+  // Labor Day: 9월 첫번째 월요일
+  if (m === 9 && wd === 1 && d <= 7) return true;
+  // Thanksgiving: 11월 네번째 목요일
+  if (m === 11 && wd === 4 && d >= 22 && d <= 28) return true;
+  // Good Friday: 부활절 금요일 (2025: 4/18, 2026: 4/3)
+  // 근사: 3~4월 금요일 중 부활절 전 금요일 (하드코딩)
+  const easterFridays = ['2025-04-18', '2026-04-03', '2027-03-26', '2028-04-14'];
+  const nyDateStr = `${nyTime.getUTCFullYear()}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+  if (easterFridays.includes(nyDateStr)) return true;
+
+  return false;
+}
+
+/**
  * 미국 정규장 여부 (KST 기준, 서머타임 대응)
  *  - 서머타임(EDT, 3~11월): 22:30~05:00 KST
  *  - 표준시  (EST, 11~ 3월): 23:30~06:00 KST
@@ -3721,6 +3801,8 @@ function isUsMarketOpen() {
   const { day, min } = nowKST();
   // 일요일 KST: 뉴욕 토요일 낮 = 완전 마감
   if (day === 0) return false;
+  // ✅ 미국 공휴일 체크 (MLK Day, Presidents Day, Good Friday 등)
+  if (isUsHoliday()) return false;
   // 평일(월~금): KST 22:30~익일05:00
   //   22:30 이후(당일) OR 00:00~05:00(다음날 새벽)
   if (day >= 1 && day <= 5) {
