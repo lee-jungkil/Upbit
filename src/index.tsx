@@ -736,6 +736,98 @@ app.post('/api/kis/us/order', async (c) => {
   return doUsOrder()
 })
 
+// ── KIS 프록시: 국내주식 체결 확인 (TTTC8001R)
+app.post('/api/kis/confirm', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as any
+  const { appKey, appSecret, accountNo, ordNo, ticker, kisToken } = body
+  if (!appKey || !appSecret || !accountNo || !ordNo) {
+    return c.json({ error: 'appKey, appSecret, accountNo, ordNo 필수' }, 400)
+  }
+  const { token, error, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret, kisToken)
+  if (!token) return c.json({ error: error || '토큰 실패', serverBlocked: !!networkError }, networkError ? 503 : 401)
+
+  try {
+    const [cano, acntPrdtCd] = accountNo.split('-')
+    // TTTC8001R: 주식 주문체결 조회
+    const url = `https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/trading/inquire-daily-ccld?CANO=${cano}&ACNT_PRDT_CD=${acntPrdtCd}&INQR_STRT_DT=${new Date(Date.now()+9*3600*1000).toISOString().slice(0,10).replace(/-/g,'')}&INQR_END_DT=${new Date(Date.now()+9*3600*1000).toISOString().slice(0,10).replace(/-/g,'')}&SLL_BUY_DVSN_CD=00&INQR_DVSN=00&PDNO=${ticker||''}&CCLD_DVSN=00&ORD_GNO_BRNO=&ODNO=${ordNo}&INQR_DVSN_3=00&INQR_DVSN_1=&CTX_AREA_FK100=&CTX_AREA_NK100=`
+    const res = await fetch(url, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        appkey: appKey, appsecret: appSecret,
+        tr_id: 'TTTC8001R', custtype: 'P',
+      },
+      // @ts-ignore
+      signal: AbortSignal.timeout(8000),
+    })
+    const data: any = await res.json()
+    if (data.rt_cd !== '0') {
+      return c.json({ error: data.msg1 || JSON.stringify(data).slice(0,200), rtCd: data.rt_cd }, 400)
+    }
+    const items = (data.output1 || []).map((item: any) => ({
+      ordNo:      item.odno,
+      ticker:     item.pdno,
+      name:       item.prdt_name,
+      side:       item.sll_buy_dvsn_cd === '01' ? 'buy' : 'sell',
+      ordQty:     parseInt(item.ord_qty || '0'),
+      ccldQty:    parseInt(item.tot_ccld_qty || '0'),   // 총 체결수량
+      remainQty:  parseInt(item.rmn_qty || '0'),         // 잔여수량
+      ccldAmt:    parseFloat(item.tot_ccld_amt || '0'),  // 총 체결금액
+      ccldPrice:  parseFloat(item.avg_prvs || item.ccld_unpr3 || '0'), // 평균체결가
+      status:     item.tot_ccld_qty === item.ord_qty ? 'filled' : parseInt(item.tot_ccld_qty || '0') > 0 ? 'partial' : 'pending',
+    }))
+    const filled  = items.find((i: any) => i.ordNo === ordNo)
+    return c.json({ ok: true, items, filled: filled || null })
+  } catch (e: any) {
+    return c.json({ error: e?.message || '체결 조회 실패', serverBlocked: true }, 503)
+  }
+})
+
+// ── KIS 프록시: 미국주식 체결 확인 (TTTS3035R)
+app.post('/api/kis/us/confirm', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as any
+  const { appKey, appSecret, accountNo, ordNo, kisToken } = body
+  if (!appKey || !appSecret || !accountNo || !ordNo) {
+    return c.json({ error: 'appKey, appSecret, accountNo, ordNo 필수' }, 400)
+  }
+  const { token, error, networkError } = await getKisToken({ ...c.env } as any, appKey, appSecret, kisToken)
+  if (!token) return c.json({ error: error || '토큰 실패', serverBlocked: !!networkError }, networkError ? 503 : 401)
+
+  try {
+    const [cano, acntPrdtCd] = accountNo.split('-')
+    const today = new Date(Date.now()+9*3600*1000).toISOString().slice(0,10).replace(/-/g,'')
+    // TTTS3035R: 해외주식 체결내역조회
+    const url = `https://openapi.koreainvestment.com:9443/uapi/overseas-stock/v1/trading/inquire-ccnl?CANO=${cano}&ACNT_PRDT_CD=${acntPrdtCd}&PDNO=&ORD_STRT_DT=${today}&ORD_END_DT=${today}&SLL_BUY_DVSN=00&CCLD_NCCS_DVSN=00&OVRS_EXCG_CD=&SORT_SQN=DS&ORD_DT=&ORD_GNO_BRNO=&ODNO=${ordNo}&CTX_AREA_FK200=&CTX_AREA_NK200=`
+    const res = await fetch(url, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        appkey: appKey, appsecret: appSecret,
+        tr_id: 'TTTS3035R', custtype: 'P',
+      },
+      // @ts-ignore
+      signal: AbortSignal.timeout(8000),
+    })
+    const data: any = await res.json()
+    if (data.rt_cd !== '0') {
+      return c.json({ error: data.msg1 || JSON.stringify(data).slice(0,200), rtCd: data.rt_cd }, 400)
+    }
+    const items = (data.output1 || []).map((item: any) => ({
+      ordNo:      item.odno,
+      ticker:     item.pdno,
+      name:       item.prdt_name,
+      side:       item.sll_buy_dvsn_cd === '02' ? 'buy' : 'sell',
+      ordQty:     parseInt(item.ft_ord_qty || '0'),
+      ccldQty:    parseInt(item.ft_ccld_qty || '0'),    // 체결수량
+      ccldPrice:  parseFloat(item.ft_ccld_unpr3 || '0'), // 체결단가(달러)
+      ccldAmt:    parseFloat(item.ft_ccld_amt2 || '0'),  // 체결금액
+      status:     parseInt(item.ft_ccld_qty || '0') > 0 ? 'filled' : 'pending',
+    }))
+    const filled = items.find((i: any) => i.ordNo === ordNo)
+    return c.json({ ok: true, items, filled: filled || null })
+  } catch (e: any) {
+    return c.json({ error: e?.message || '미국 체결 조회 실패', serverBlocked: true }, 503)
+  }
+})
+
 // ── 환율 조회 프록시 (한국은행 API → 원/달러 환율)
 app.get('/api/forex/usd-krw', async (c) => {
   try {

@@ -3,6 +3,250 @@
 // KIS (한국투자증권) API 연동 — 국내 + 미국주식 지원
 // ============================================================
 
+// ============================================================
+// ── 기술적 지표 계산 유틸 (RSI / MACD / 볼린저밴드)
+// 모두 순수 함수 — 데이터 배열(close prices)을 받아 수치 반환
+// ============================================================
+
+/**
+ * RSI(Relative Strength Index) 계산
+ * @param {number[]} closes  종가 배열 (최신값이 마지막)
+ * @param {number}   period  기간 (기본 14)
+ * @returns {number} RSI 0~100
+ */
+function calcRSI(closes, period = 14) {
+  if (closes.length < period + 1) return 50; // 데이터 부족 → 중립 50
+  let gains = 0, losses = 0;
+  for (let i = closes.length - period; i < closes.length; i++) {
+    const diff = closes[i] - closes[i - 1];
+    if (diff > 0) gains  += diff;
+    else          losses -= diff;
+  }
+  const avgGain = gains  / period;
+  const avgLoss = losses / period;
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - (100 / (1 + rs));
+}
+
+/**
+ * EMA(지수이동평균) 계산
+ * @param {number[]} closes  종가 배열
+ * @param {number}   period  기간
+ * @returns {number[]} EMA 배열
+ */
+function calcEMA(closes, period) {
+  if (closes.length < period) return closes.map(() => closes[0]);
+  const k = 2 / (period + 1);
+  const ema = [closes[0]];
+  for (let i = 1; i < closes.length; i++) {
+    ema.push(closes[i] * k + ema[i - 1] * (1 - k));
+  }
+  return ema;
+}
+
+/**
+ * MACD 계산 (12, 26, 9)
+ * @param {number[]} closes  종가 배열
+ * @returns {{ macd: number, signal: number, hist: number }}
+ */
+function calcMACD(closes) {
+  if (closes.length < 35) return { macd: 0, signal: 0, hist: 0 };
+  const ema12 = calcEMA(closes, 12);
+  const ema26 = calcEMA(closes, 26);
+  const macdLine = ema12.map((v, i) => v - ema26[i]);
+  const signalLine = calcEMA(macdLine, 9);
+  const last = macdLine.length - 1;
+  return {
+    macd:   macdLine[last],
+    signal: signalLine[last],
+    hist:   macdLine[last] - signalLine[last],
+  };
+}
+
+/**
+ * 볼린저 밴드 계산 (20, 2σ)
+ * @param {number[]} closes  종가 배열
+ * @param {number}   period  기간 (기본 20)
+ * @returns {{ upper, mid, lower, bw, pct }} bw=밴드폭%, pct=현재가 위치 0~1
+ */
+function calcBollinger(closes, period = 20) {
+  if (closes.length < period) return { upper: 0, mid: 0, lower: 0, bw: 0, pct: 0.5 };
+  const slice = closes.slice(-period);
+  const mid   = slice.reduce((a, b) => a + b, 0) / period;
+  const std   = Math.sqrt(slice.reduce((a, b) => a + (b - mid) ** 2, 0) / period);
+  const upper = mid + 2 * std;
+  const lower = mid - 2 * std;
+  const last  = closes[closes.length - 1];
+  const bw    = mid > 0 ? ((upper - lower) / mid) * 100 : 0;
+  const pct   = upper !== lower ? (last - lower) / (upper - lower) : 0.5;
+  return { upper, mid, lower, bw, pct };
+}
+
+/**
+ * 거래량 이동평균 배율 계산
+ * @param {number[]} vols    거래량 배열
+ * @param {number}   period  기간 (기본 20)
+ * @returns {number} 최근 거래량 / 평균 거래량 배율
+ */
+function calcVolumeMult(vols, period = 20) {
+  if (vols.length < 2) return 1;
+  const slice  = vols.slice(-Math.min(period, vols.length));
+  const avgVol = slice.slice(0, -1).reduce((a, b) => a + b, 0) / (slice.length - 1);
+  return avgVol > 0 ? slice[slice.length - 1] / avgVol : 1;
+}
+
+/**
+ * 매수 압력 계산: (고가-종가) / (고가-저가) — 1에 가까울수록 매도 압력
+ * 반대로 (종가-저가) / (고가-저가) 를 매수압력으로 사용
+ */
+function calcBuyPressure(highs, lows, closes) {
+  if (!highs.length) return 1;
+  const last = highs.length - 1;
+  const range = highs[last] - lows[last];
+  return range > 0 ? (closes[last] - lows[last]) / range : 0.5;
+}
+
+/**
+ * 종합 신호 점수 계산 (0~100)
+ * RSI, MACD, 볼린저, 거래량 가중 합산
+ */
+function calcSignalScore(closes, highs, lows, volumes, strategy, ap) {
+  const rsi     = calcRSI(closes, 14);
+  const macd    = calcMACD(closes);
+  const boll    = calcBollinger(closes, 20);
+  const volMult = calcVolumeMult(volumes, 20);
+  const buyPr   = calcBuyPressure(highs, lows, closes);
+
+  let score = 50; // 기준점
+
+  if (strategy === 'scalping') {
+    // RSI 40~60: 중립 구간 가점
+    const rsiOk = rsi >= ap.rsiMin && rsi <= ap.rsiMax;
+    if (rsiOk)    score += 15;
+    else if (rsi < 30 || rsi > 70) score -= 20; // 극단값 감점
+    // MACD 히스토그램 방향
+    if (macd.hist > 0) score += 12;
+    else if (macd.hist < 0) score -= 10;
+    // 볼린저 밴드 위치 (0.4~0.6: 중간, 매수 시 상승 여지 있음)
+    if (boll.pct >= 0.2 && boll.pct <= 0.6) score += 8;
+    else if (boll.pct > 0.8) score -= 15; // 밴드 상단 근처 → 과매수
+    // 거래량 배수
+    if (volMult >= ap.volMult) score += 10;
+    // 매수 압력
+    if (buyPr >= ap.buyPressure) score += 8;
+  } else if (strategy === 'volume') {
+    if (volMult >= ap.volMult) score += 25;
+    if (macd.hist > 0) score += 15;
+    if (rsi < (ap.rsiMax || 70)) score += 10;
+  } else if (strategy === 'momentum') {
+    if (macd.hist > 0 && macd.macd > 0) score += 20;
+    if (rsi > 50 && rsi < 70) score += 15;
+    if (volMult >= ap.volMult) score += 10;
+    if (boll.pct > 0.5) score += 8;
+  } else if (strategy === 'mean_reversion') {
+    if (rsi < (ap.rsiMax || 30)) score += 25;
+    if (boll.pct < 0.2) score += 20; // 밴드 하단 근처
+    if (macd.hist > 0) score += 10; // 반등 시작 신호
+  }
+
+  // 적응 모드 보정
+  score += (ap.scoreBonus || 0);
+  return { score: Math.min(100, Math.max(0, Math.round(score))), rsi, macd, boll, volMult, buyPr };
+}
+
+// ============================================================
+// ── 켈리 공식 기반 자금관리 (Kelly Criterion)
+// ============================================================
+
+/**
+ * 켈리 공식으로 최적 포지션 크기 계산
+ * f* = (bp - q) / b
+ *   b = 평균 손익비 (win/loss)
+ *   p = 승률
+ *   q = 1 - p (패율)
+ *
+ * 하프켈리 사용 (리스크 절반): f* × 0.5
+ * 최소 posMinAmt, 최대 posMaxAmt × posCapMult 제한
+ *
+ * @param {number} winRate    0~1 (최근 승률)
+ * @param {number} avgWin     평균 승리금액 (원)
+ * @param {number} avgLoss    평균 손실금액 (원, 양수)
+ * @param {number} available  가용 자금 (원)
+ * @param {object} cfg        STATE.config
+ * @returns {number} 포지션 금액 (원)
+ */
+function calcKellyPositionSize(winRate, avgWin, avgLoss, available, cfg) {
+  const posMin     = cfg.posMinAmt  || 50000;
+  const posMaxBase = cfg.posMaxAmt  || 150000;
+  const posCapMult = cfg.posCapMult || 1.0;
+  const posMax     = Math.round(posMaxBase * posCapMult / 10000) * 10000;
+
+  // 최근 거래 데이터 불충분(< 5회) → 기본 중간값 사용
+  const totalTrades = STATE.stats.totalTrades;
+  if (totalTrades < 5 || winRate <= 0 || avgLoss <= 0) {
+    // 초기: 포지션 금액 = (posMin + posMax) / 2
+    const base = Math.round((posMin + posMax) / 2);
+    return Math.min(base, available, posMax);
+  }
+
+  const p = Math.min(Math.max(winRate, 0.01), 0.99);
+  const q = 1 - p;
+  // 손익비: avgWin / avgLoss
+  const b = avgLoss > 0 ? avgWin / avgLoss : 1;
+
+  // 켈리 비율 (음수면 0 처리)
+  let kellyFrac = (b * p - q) / b;
+  kellyFrac = Math.max(0, kellyFrac);
+
+  // 하프 켈리 (리스크 절반)
+  const halfKelly = kellyFrac * 0.5;
+
+  // 연속 손실 시 포지션 축소 (마틴게일 역방향 — 안티마틴게일)
+  const drawdownFactor = calcDrawdownFactor();
+
+  // 포지션 금액 = 가용 자금 × 하프켈리 × 드로우다운 조정
+  const raw = Math.round(available * halfKelly * drawdownFactor);
+
+  // 최소/최대 제한
+  const capped = Math.min(Math.max(raw, posMin), posMax, available);
+  return capped;
+}
+
+/**
+ * 연속 손실에 따른 포지션 축소 계수 반환
+ * 연속 손실 0회: 1.0 (100%)
+ * 연속 손실 1회: 0.8 (80%)
+ * 연속 손실 2회: 0.6 (60%)
+ * 연속 손실 3회+: 0.4 (40%)
+ */
+function calcDrawdownFactor() {
+  const results = STATE.recentResults;
+  if (results.length === 0) return 1.0;
+  // 최근 결과에서 연속 손실 횟수 카운트 (뒤에서부터)
+  let consecutive = 0;
+  for (let i = results.length - 1; i >= 0; i--) {
+    if (!results[i].win) consecutive++;
+    else break;
+  }
+  if (consecutive === 0) return 1.0;
+  if (consecutive === 1) return 0.8;
+  if (consecutive === 2) return 0.6;
+  return 0.4; // 3회 이상 연속 손실
+}
+
+/**
+ * 평균 승리/손실 금액 계산 (최근 20회 기준)
+ */
+function calcAvgWinLoss() {
+  const results = STATE.recentResults.slice(-20);
+  const wins    = results.filter(r => r.win);
+  const losses  = results.filter(r => !r.win);
+  const avgWin  = wins.length   > 0 ? wins.reduce((s, r) => s + Math.abs(r.pnlPct), 0) / wins.length   : STATE.config.profitTarget;
+  const avgLoss = losses.length > 0 ? losses.reduce((s, r) => s + Math.abs(r.pnlPct), 0) / losses.length : STATE.config.stopLoss;
+  return { avgWin, avgLoss };
+}
+
 // ─── 단일 탭 리더 선출 (BroadcastChannel 기반) ────────────────
 // 여러 기기/탭에서 동시에 봇을 실행하면 주문이 중복되므로
 // 새 탭이 "봇 시작"하면 기존 탭의 봇은 자동 정지됨
@@ -1526,6 +1770,36 @@ async function checkPositionsForExit() {
       exitType   = 'loss';
     }
 
+    // ── 1-b) 부분 청산: 1차 목표 도달 시 50% 매도 + 나머지 트레일 ──
+    // halfExited 플래그: false(미실행) → true(1차 50% 완료)
+    // 조건: 목표가 × 0.6 이상 도달 & 아직 halfExited 아님 & 손절 아님
+    // 마감 준비 구간에서는 부분 청산 없이 전량 청산으로 직행
+    else if (!isPreCloseMode && !pos.halfExited && pnlPct >= target * 0.6) {
+      const halfQty = Math.floor(pos.qty / 2);
+      if (halfQty >= 1) {
+        // 50% 수량 청산 실행
+        const halfSlip   = activeEp.slippagePct;
+        const halfNetPnl = pnlPct - 0.245 - halfSlip;
+        addLog('scan', `   ✂️ 부분 청산(50%): ${pos.name} +${pnlPct.toFixed(2)}% (목표 ${(target*0.6).toFixed(2)}% 도달) → ${halfQty}주 청산`);
+
+        // 부분 청산용 임시 pos 복사 (halfQty만)
+        const halfPos = { ...pos, qty: halfQty };
+        const halfOk  = await executeExit(halfPos, `1차 부분청산 +${pnlPct.toFixed(2)}%`, halfNetPnl, 'partial', halfSlip);
+
+        if (halfOk) {
+          pos.qty       -= halfQty;        // 남은 수량 = 원래 - halfQty
+          pos.halfExited = true;            // 1차 부분청산 완료 플래그
+          // 남은 수량에 대해 트레일 즉시 발동 (이미 목표에 도달했으므로)
+          pos.trailArmed = true;
+          addLog('scan', `   🔒 트레일 자동 발동: ${pos.name} 잔여 ${pos.qty}주 — 나머지 트레일 대기`);
+          savePositions();
+        }
+      } else {
+        // 수량 1주밖에 없으면 전량 트레일로 처리
+        pos.trailArmed = true;
+      }
+    }
+
     // ── 2) 트레일링 스탑 ────────────────────────────────────────
     // 트레일 발동 조건: 익절목표 × activeEp.trailTriggerMult 최초 도달
     // 마감 준비 구간: 기준 낮춰 작은 이익에도 트레일 발동
@@ -1628,6 +1902,11 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
         }
         // ✅ 미국 매도 접수 성공 — 지정가(현재가-0.5%) 즉시체결 방식
         addLog('info', `📤 미국 매도접수: ${pos.ticker} ${pos.qty}주 @$${actualExitPrice.toFixed(2)} (지정가) [ordNo:${data.ordNo} trId:${data.trId}]`);
+        // 🔍 3초 후 체결 확인 (비동기 — 메인 흐름 블록 안 함)
+        if (data.ordNo) {
+          const _ordNo = data.ordNo, _ticker = pos.ticker;
+          setTimeout(() => checkFillStatus('US', _ordNo, _ticker), 3000);
+        }
       } else {
         // 국내주식 매도
         const res = await fetch('/api/kis/order', {
@@ -1653,6 +1932,11 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
         }
         // ✅ 국내 매도 접수 성공 — 시장가(ORD_DVSN=01) 즉시체결
         addLog('info', `📤 국내 매도접수: ${pos.ticker} ${pos.qty}주 (시장가) [ordNo:${data.ordNo} trId:TTTC0801U]`);
+        // 🔍 3초 후 체결 확인 (비동기)
+        if (data.ordNo) {
+          const _ordNo = data.ordNo, _ticker = pos.ticker;
+          setTimeout(() => checkFillStatus('KR', _ordNo, _ticker), 3000);
+        }
       }
     } catch(e) {
       addLog('error', `❌ 매도 실패: ${pos.ticker} — ${e.message}`);
@@ -1766,37 +2050,109 @@ async function scanForEntries() {
 // ─── 국내주식 후보 종목 스캔 ─────────────────────────────────
 async function generateKrCandidates() {
   const strategy = document.getElementById('strategy-select').value || STATE.strategy;
+  const ap = (ADAPTIVE_PARAMS[strategy] || ADAPTIVE_PARAMS.scalping)[STATE.adaptiveMode];
 
-  // 네이버 프록시로 거래량 순위 실시간 조회 (API 키 불필요)
+  // ── Step 1: 거래량 순위 30개 조회 (네이버 프록시) ────────────────
+  let rankStocks = [];
   try {
     const res = await axios.get('/api/naver/volume-rank?market=KOSPI&top=30', { timeout: 10000 });
-    const stocks = res.data?.stocks || [];
-    if (stocks.length > 0) {
-      const ap = (ADAPTIVE_PARAMS[strategy] || ADAPTIVE_PARAMS.scalping)[STATE.adaptiveMode];
-      const filtered = stocks.filter(item => {
-        const pct = item.changeRate;
-        if (strategy === 'scalping')       return pct > ap.pctMin && pct < ap.pctMax;
-        if (strategy === 'volume')         return pct > 0;
-        if (strategy === 'momentum')       return pct > ap.pctMin;
-        if (strategy === 'mean_reversion') return pct < ap.pctMin;
-        return true;
-      });
-      const result = filtered.slice(0, 5).map(item => ({
-        ticker:    item.code,
-        name:      item.name,
-        price:     item.price,
-        pctChange: item.changeRate,
-        volume:    0,
-        score:     Math.random() * 30 + 60 + ap.scoreBonus,
-      }));
-      if (result.length > 0) return result;
-    }
+    rankStocks = res.data?.stocks || [];
   } catch(e) {
     addLog('warn', '⚠️ 거래량 순위 조회 실패 — 시뮬레이션 사용');
+    return generateSimCandidates(strategy);
   }
 
-  // API 없거나 실패 시 시뮬레이션 종목
-  return generateSimCandidates(strategy);
+  if (rankStocks.length === 0) return generateSimCandidates(strategy);
+
+  // ── Step 2: 전략별 1차 필터 (등락률 기준) ───────────────────────
+  const preFiltered = rankStocks.filter(item => {
+    const pct = item.changeRate;
+    if (strategy === 'scalping')       return pct > ap.pctMin && pct < ap.pctMax;
+    if (strategy === 'volume')         return pct > 0;
+    if (strategy === 'momentum')       return pct > ap.pctMin;
+    if (strategy === 'mean_reversion') return pct < ap.pctMin;
+    return true;
+  });
+
+  // 필터 통과 0개이면 원본 전체 사용 (빈 결과 방지)
+  const candPool = preFiltered.length > 0 ? preFiltered : rankStocks;
+
+  // ── Step 3: 일봉 데이터 병렬 조회 (최대 15개, 타임아웃 8초) ──────
+  // 네이버 fchart API → closes/highs/lows/volumes 추출
+  const TOP_N = Math.min(candPool.length, 15);
+  const candleResults = await Promise.allSettled(
+    candPool.slice(0, TOP_N).map(async item => {
+      try {
+        const r = await axios.get(`/api/naver/candles/${item.code}?count=40`, { timeout: 8000 });
+        const candles = r.data?.candles || [];
+        if (candles.length < 10) return null; // 데이터 부족 → 스킵
+        const closes  = candles.map(c => c.close);
+        const highs   = candles.map(c => c.high  || c.close);
+        const lows    = candles.map(c => c.low   || c.close);
+        const volumes = candles.map(c => c.volume || 0);
+        return { item, closes, highs, lows, volumes };
+      } catch(e2) {
+        return null;
+      }
+    })
+  );
+
+  // ── Step 4: calcSignalScore()로 실제 점수 계산 ───────────────────
+  const scored = [];
+  let withCandle = 0, withoutCandle = 0;
+
+  for (const res of candleResults) {
+    const data = res.status === 'fulfilled' ? res.value : null;
+    if (data) {
+      // 일봉 데이터 있음 → RSI/MACD/볼린저/거래량 기반 실제 점수
+      const sig = calcSignalScore(data.closes, data.highs, data.lows, data.volumes, strategy, ap);
+      withCandle++;
+      // 전략 최소 점수 미달 → 스킵
+      const minScore = ap.scoreBonus >= 0 ? 45 : 35;
+      if (sig.score < minScore && strategy !== 'mean_reversion') continue;
+      scored.push({
+        ticker:    data.item.code,
+        name:      data.item.name,
+        price:     data.item.price,
+        pctChange: data.item.changeRate,
+        volume:    data.item.volume || data.volumes[data.volumes.length - 1] || 0,
+        score:     Math.min(100, sig.score + ap.scoreBonus),
+        rsi:       sig.rsi,
+        macdHist:  sig.macd.hist,
+        bollPct:   sig.boll.pct,
+        volMult:   sig.volMult,
+      });
+    } else {
+      // 일봉 조회 실패 → 등락률 기반 폴백 점수 (고정 50 + α)
+      // candPool에서 인덱스 역추적은 어려우므로 scored에 직접 추가 안 함
+      withoutCandle++;
+    }
+  }
+
+  addLog('scan', `   🇰🇷 일봉 RSI/MACD 계산: ${withCandle}개 성공, ${withoutCandle}개 실패`);
+
+  // ── Step 5: 점수 내림차순 정렬 → 상위 5개 반환 ──────────────────
+  if (scored.length > 0) {
+    scored.sort((a, b) => b.score - a.score);
+    const top5 = scored.slice(0, 5);
+    const topStr = top5.slice(0, 3).map(c =>
+      `${c.name}(${c.score}점,RSI:${c.rsi?.toFixed(0)||'-'})`
+    ).join(', ');
+    addLog('scan', `   🇰🇷 국내 후보 ${top5.length}개 [실RSI/MACD] — ${topStr}`);
+    return top5;
+  }
+
+  // 일봉 점수 기반 후보 없음 → 등락률 기반 폴백
+  addLog('warn', '⚠️ 일봉 점수 기반 후보 없음 — 등락률 폴백 사용');
+  const fallback = candPool.slice(0, 5).map(item => ({
+    ticker:    item.code,
+    name:      item.name,
+    price:     item.price,
+    pctChange: item.changeRate,
+    volume:    item.volume || 0,
+    score:     Math.min(100, Math.max(40, 50 + (item.changeRate || 0) * 5 + ap.scoreBonus)),
+  }));
+  return fallback;
 }
 
 function generateSimCandidates(strategy) {
@@ -1987,15 +2343,56 @@ async function generateUsCandidates() {
           sorted = sortPool.sort((a, b) => Math.abs(b.pctChange || 0) - Math.abs(a.pctChange || 0));
         }
 
-        const candidates = sorted.slice(0, 5).map(item => ({
-          ticker:    item.ticker,
-          name:      item.name,
-          price:     item.price,
-          pctChange: item.pctChange,
-          score:     Math.random() * 30 + 60 + (usAp.scoreBonus || 0),
-          market:    'US',
-          excd:      item.excd,
-        }));
+        // ── 미국주식 동적 점수 계산 (일봉 없음 → 시세 데이터 기반) ──
+        // 등락률·거래량·MA거리 등 현재 시세로 신호 점수 산출 (Math.random 제거)
+        const allPcts   = valid.map(i => Math.abs(i.pctChange || 0));
+        const avgPct    = allPcts.length ? allPcts.reduce((a,b)=>a+b,0)/allPcts.length : 1;
+        const allVols   = valid.map(i => i.volume || 0);
+        const avgVol    = allVols.length ? allVols.reduce((a,b)=>a+b,0)/allVols.length : 1;
+
+        const candidates = sorted.slice(0, 5).map(item => {
+          const pct   = item.pctChange || 0;
+          const vol   = item.volume || 0;
+          let sc = 50; // 기준점
+
+          if (strategy === 'scalping') {
+            // 등락률 1~3% 구간: 매수 신호 가장 강함
+            if (Math.abs(pct) >= 1.0 && Math.abs(pct) <= 3.0) sc += 15;
+            else if (Math.abs(pct) > 3.0) sc -= 5;
+            // 거래량 배수 (오늘 거래량 / 평균 거래량)
+            const vMult = avgVol > 0 ? vol / avgVol : 1;
+            if (vMult >= 1.5) sc += 12;
+            else if (vMult >= 1.0) sc += 6;
+            // 방향성 가중
+            if (pct > 0) sc += 8;
+          } else if (strategy === 'volume') {
+            const vMult = avgVol > 0 ? vol / avgVol : 1;
+            if (vMult >= 2.0) sc += 25;
+            else if (vMult >= 1.5) sc += 15;
+            if (pct > 0) sc += 10;
+          } else if (strategy === 'momentum') {
+            // 상위 등락률 가중
+            const rank = sorted.indexOf(item);
+            sc += Math.max(0, 20 - rank * 5);
+            if (pct > 0) sc += 10;
+          } else if (strategy === 'mean_reversion') {
+            // 하락폭 클수록 반등 기대 → 높은 점수
+            if (pct < -2.0) sc += 25;
+            else if (pct < -1.0) sc += 15;
+          }
+
+          sc = Math.min(100, Math.max(0, Math.round(sc + (usAp.scoreBonus || 0))));
+          return {
+            ticker:    item.ticker,
+            name:      item.name,
+            price:     item.price,
+            pctChange: pct,
+            volume:    vol,
+            score:     sc,
+            market:    'US',
+            excd:      item.excd,
+          };
+        });
 
         if (candidates.length > 0) {
           const topStr = candidates.slice(0,3).map(c => `${c.ticker}(${c.pctChange>0?'+':''}${(c.pctChange||0).toFixed(2)}%)`).join(', ');
@@ -2034,16 +2431,29 @@ function generateUsSimCandidates(strategy, ap) {
   ];
   const adap = ap || (ADAPTIVE_PARAMS[strategy] || ADAPTIVE_PARAMS.scalping)[STATE.adaptiveMode];
 
-  // 모든 종목에 랜덤 변동률 부여 후 전략별 정렬 (조건 필터 없음 — 항상 결과 보장)
-  const simulated = US_STOCKS.map(s => {
-    const pctChange = parseFloat(((Math.random() - 0.35) * 5).toFixed(2));
+  // 페이퍼 시뮬레이션: 고정 시드 기반 변동률 (Math.random 최소화)
+  // 종목 고유 특성을 반영한 변동성 범위 (실제 베타 기반 근사)
+  const BETA = { NVDA:1.8, TSLA:2.0, AMD:1.6, NFLX:1.3, META:1.2, AMZN:1.1,
+                 AAPL:0.9, MSFT:0.8, GOOGL:1.0, JPM:0.9, INTC:1.1, CRM:1.0 };
+  const now = Date.now();
+  const simulated = US_STOCKS.map((s, idx) => {
+    // 시간 + 종목 인덱스 기반 의사 랜덤 (같은 스캔에서 일관성 유지)
+    const seed = ((now / 60000 | 0) + idx * 17) % 100;
+    const beta = BETA[s.ticker] || 1.0;
+    const pctChange = parseFloat((((seed / 100) - 0.4) * 4 * beta).toFixed(2));
     const price     = Math.round(s.basePrice * (1 + pctChange / 100) * 100) / 100;
+    // 전략별 점수 계산 (Math.random 불필요)
+    let sc = 50;
+    if (strategy === 'scalping')       sc += Math.abs(pctChange) >= 1.0 && Math.abs(pctChange) <= 3.0 ? 20 : 5;
+    else if (strategy === 'volume')    sc += beta >= 1.5 ? 20 : 10;
+    else if (strategy === 'momentum')  sc += pctChange > 0 ? 20 : 0;
+    else if (strategy === 'mean_reversion') sc += pctChange < -1.5 ? 25 : (pctChange < 0 ? 10 : 0);
     return {
       ticker:    s.ticker,
       name:      s.name,
       price,
       pctChange,
-      score:     Math.min(100, Math.max(0, Math.round(50 + Math.random() * 40) + (adap.scoreBonus || 0))),
+      score:     Math.min(100, Math.max(0, Math.round(sc + (adap.scoreBonus || 0)))),
       market:    'US',
     };
   });
@@ -2057,6 +2467,50 @@ function generateUsSimCandidates(strategy, ap) {
     sorted = simulated.sort((a, b) => Math.abs(b.pctChange) - Math.abs(a.pctChange)); // 변동 큰 순
   }
   return sorted.slice(0, 5);
+}
+
+// ─── 체결 확인 (국내: TTTC8001R / 미국: TTTS3035R) ──────────
+/**
+ * 매수/매도 접수 후 체결 상태 조회
+ * @param {string}  market  'KR' | 'US'
+ * @param {string}  ordNo   주문번호
+ * @param {string}  ticker  종목코드
+ * @returns {Promise<{status:'filled'|'partial'|'pending'|'error', ccldQty, remainQty}>}
+ */
+async function checkFillStatus(market, ordNo, ticker) {
+  if (!KEYS.appKey || !KEYS.accountNo) return { status: 'error', reason: 'no-keys' };
+  if (!ordNo) return { status: 'error', reason: 'no-ordNo' };
+
+  try {
+    const endpoint = market === 'US' ? '/api/kis/us/confirm' : '/api/kis/confirm';
+    const body     = {
+      appKey:    KEYS.appKey,
+      appSecret: KEYS.appSecret,
+      accountNo: KEYS.accountNo,
+      kisToken:  getCachedKisToken(),
+      ordNo,
+      ticker,
+    };
+    const res  = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(8000),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      addLog('warn', `⚠️ 체결 확인 실패 [${market}] ordNo:${ordNo} — ${data.error || res.status}`);
+      return { status: 'error', reason: data.error };
+    }
+    const filled = data.filled || {};
+    const status = filled.status || 'pending';
+    addLog('scan', `   📋 체결확인 [${market}] ${ticker} ordNo:${ordNo} → ${status} (체결:${filled.ccldQty||0}주, 잔여:${filled.remainQty||0}주)`);
+    return { status, ccldQty: filled.ccldQty || 0, remainQty: filled.remainQty || 0 };
+  } catch(e) {
+    // 체결확인 API 자체 오류 → 비중요(매도/매수 접수는 이미 성공) → warn만
+    addLog('warn', `⚠️ 체결 확인 오류 [${market}] ordNo:${ordNo} — ${e?.message || e}`);
+    return { status: 'error', reason: e?.message };
+  }
 }
 
 // 매수 실행 (국내/미국 통합)
@@ -2096,19 +2550,31 @@ async function executeEntry(candidate) {
     return;
   }
 
-  // ── 포지션 금액 계산 ───────────────────────────────────
+  // ── 포지션 금액 계산 (켈리 공식 Half-Kelly) ──────────────────
   const posMin     = STATE.config.posMinAmt  || 50000;
   const posMaxBase = STATE.config.posMaxAmt  || 150000;
-  const posCapMult = STATE.config.posCapMult || 1.0;
-  const posMaxFinal= Math.round(posMaxBase * posCapMult / 10000) * 10000;
   if (available < posMin) {
     addLog('warn', `⚠️ 가용 현금 부족 (${fmtManwon(available)} < 최소 ${fmtManwon(posMin)})`);
     return;
   }
-  const score     = (candidate.score || 70) / 100;
-  const rawAmt    = posMin + Math.round((posMaxFinal - posMin) * score);
-  const investAmt = Math.min(rawAmt, available, posMaxFinal);
+
+  // 최근 거래 승률 및 평균 손익 계산
+  const totalTrades  = STATE.stats.totalTrades || 0;
+  const winTrades    = STATE.stats.winTrades   || 0;
+  const winRate      = totalTrades > 0 ? winTrades / totalTrades : 0.5;
+  const { avgWin, avgLoss } = calcAvgWinLoss();
+  const drawdownFactor      = calcDrawdownFactor();
+
+  // 켈리 공식으로 포지션 금액 산출
+  const kellyAmt = calcKellyPositionSize(winRate, avgWin, avgLoss, available, STATE.config);
+  const investAmt = kellyAmt;
   if (investAmt < 10000) return;
+
+  // 켈리 진단 로그 (거래 5회 이상 시 상세 출력)
+  if (totalTrades >= 5) {
+    const mktF = isUs ? '🇺🇸' : '🇰🇷';
+    addLog('scan', `   ${mktF} Kelly: 승률${(winRate*100).toFixed(0)}% W:${avgWin.toFixed(2)}% L:${avgLoss.toFixed(2)}% × 드로우다운×${drawdownFactor} → ${fmtManwon(investAmt)}`);
+  }
 
   // 수량 계산
   const price = candidate.price || 1;
@@ -2145,6 +2611,11 @@ async function executeEntry(candidate) {
         // ✅ ordNo 로깅 — 실제 주문번호 확인용 (없어도 rt_cd=0이면 접수된 것으로 처리)
         addLog('info', `📥 미국 매수접수: ${candidate.ticker} ${qtyInt}주 @$${price.toFixed(2)} [ordNo:${data.ordNo||'없음'} trId:${data.trId||''}]`);
         if (!data.ordNo) addLog('warn', `⚠️ ${candidate.ticker} 매수 ordNo 없음 — KIS 접수 여부 HTS에서 확인 필요`);
+        // 🔍 3초 후 체결 확인 (비동기 — 메인 흐름 블록 안 함)
+        if (data.ordNo) {
+          const _ordNo = data.ordNo, _ticker = candidate.ticker;
+          setTimeout(() => checkFillStatus('US', _ordNo, _ticker), 3000);
+        }
       } else {
         const res = await fetch('/api/kis/order', {
           method: 'POST',
@@ -2162,6 +2633,11 @@ async function executeEntry(candidate) {
           const rtCd   = data.rtCd   ? ` [rt_cd:${data.rtCd}]` : '';
           const trInfo = data.trId   ? ` [trId:${data.trId}]`  : '';
           throw new Error((data.error || JSON.stringify(data)) + rtCd + trInfo + hint);
+        }
+        // 🔍 3초 후 체결 확인 (비동기)
+        if (data.ordNo) {
+          const _ordNo = data.ordNo, _ticker = candidate.ticker;
+          setTimeout(() => checkFillStatus('KR', _ordNo, _ticker), 3000);
         }
       }
     } catch(e) {
@@ -2198,7 +2674,7 @@ async function executeEntry(candidate) {
     ? `$${(qtyInt * price).toFixed(2)} (≈${fmtManwon(Math.round(qtyInt * price * STATE.usdKrw))})`
     : fmtManwon(qtyInt * price);
   addLog('buy', `💰 ${mktFlag} 매수: ${pos.name} (${pos.ticker})`);
-  addLog('buy', `   진입가 ${fmtPrice(pos.entryPrice)}원 | ${qty}주 | 투자 ${fmtPrice(qty * price)}원 (범위: ${fmtManwon(posMin)}~${fmtManwon(posMaxFinal)})`);
+  addLog('buy', `   진입가 ${fmtPrice(pos.entryPrice)}원 | ${qty}주 | 투자 ${fmtPrice(qty * price)}원 [Kelly: 승률${(winRate*100).toFixed(0)}% × ×${drawdownFactor}]`);
   renderPositions();
   updateStatsUI(); // 매수 즉시 총자산 카드 반영
 }
