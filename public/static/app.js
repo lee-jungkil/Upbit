@@ -1256,17 +1256,17 @@ const ADAPTIVE_PARAMS = {
       rsiMin: 40, rsiMax: 60,         // RSI 40~60 (20%p)
       volMult: 1.3,                    // 거래량 1.3배
       pctMin: 0.2, pctMax: 2.5,       // 가격변동 0.2~2.5%
-      buyPressure: 1.1,
+      buyPressure: 0.50,              // 매수압력 ≥ 0.50 (캔들 중간 이상 마감)
       scoreBonus: 10,
       desc: '승률 ≥ 65% — 진입 조건 완화, 공격적 매수',
     },
     // 1: 기본 — 승률 40~64%
     {
       label: '🔵 기본', labelShort: '기본',
-      rsiMin: 45, rsiMax: 55,         // RSI 45~55 (10%p) ← 핵심 수정
+      rsiMin: 45, rsiMax: 55,         // RSI 45~55 (10%p)
       volMult: 1.5,
       pctMin: 0.3, pctMax: 2.0,
-      buyPressure: 1.2,
+      buyPressure: 0.55,              // 매수압력 ≥ 0.55
       scoreBonus: 0,
       desc: '승률 40~64% — 표준 진입 조건',
     },
@@ -1276,7 +1276,7 @@ const ADAPTIVE_PARAMS = {
       rsiMin: 47, rsiMax: 53,         // RSI 47~53 (6%p)
       volMult: 2.0,
       pctMin: 0.4, pctMax: 1.5,
-      buyPressure: 1.35,
+      buyPressure: 0.60,              // 매수압력 ≥ 0.60
       scoreBonus: -5,
       desc: '승률 25~39% — 조건 강화, 고확률 종목만 진입',
     },
@@ -1286,7 +1286,7 @@ const ADAPTIVE_PARAMS = {
       rsiMin: 48, rsiMax: 52,         // RSI 48~52 (4%p) — 가장 엄격
       volMult: 2.5,
       pctMin: 0.5, pctMax: 1.0,
-      buyPressure: 1.5,
+      buyPressure: 0.65,              // 매수압력 ≥ 0.65 (캔들 상위 35% 마감)
       scoreBonus: -15,
       desc: '승률 < 25% — 진입 최소화, 손실 방어 최우선',
     },
@@ -2226,7 +2226,7 @@ async function generateKrCandidates() {
         price:     data.item.price,
         pctChange: data.item.changeRate,
         volume:    data.item.volume || data.volumes[data.volumes.length - 1] || 0,
-        score:     Math.min(100, sig.score + ap.scoreBonus),
+        score:     sig.score,  // scoreBonus는 calcSignalScore() 내부에서 이미 반영됨 (이중 가산 방지)
         rsi:       sig.rsi,
         macdHist:  sig.macd.hist,
         bollPct:   sig.boll.pct,
