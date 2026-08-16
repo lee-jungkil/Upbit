@@ -1132,6 +1132,24 @@ function loadConfig() {
       Object.assign(STATE.config, c);
     } catch(e) {}
   }
+  // ── stats 복원 (Kelly 계산 세션 간 연속성) ─────────────────
+  const savedStats = localStorage.getItem('bot_stats');
+  if (savedStats) {
+    try {
+      const s = JSON.parse(savedStats);
+      STATE.stats.totalTrades = s.totalTrades || 0;
+      STATE.stats.winTrades   = s.winTrades   || 0;
+      STATE.stats.totalProfit = s.totalProfit || 0;
+      // dailyProfit는 날짜가 바뀌면 초기화
+      const today = new Date().toDateString();
+      if (s.statsDate === today) {
+        STATE.stats.dailyProfit = s.dailyProfit || 0;
+      } else {
+        STATE.stats.dailyProfit = 0;
+      }
+    } catch(e) {}
+  }
+
   // market 복원
   const savedMarket = localStorage.getItem('bot_market') || 'KR';
   STATE.market = savedMarket;
@@ -1188,6 +1206,17 @@ function loadConfig() {
   }
 }
 
+/** stats → localStorage 저장 (Kelly 계산 세션 간 연속성) */
+function saveStats() {
+  localStorage.setItem('bot_stats', JSON.stringify({
+    totalTrades: STATE.stats.totalTrades,
+    winTrades:   STATE.stats.winTrades,
+    totalProfit: STATE.stats.totalProfit,
+    dailyProfit: STATE.stats.dailyProfit,
+    statsDate:   new Date().toDateString(),
+  }));
+}
+
 /** 슬라이더 변경 시 STATE → localStorage 자동저장 (로그 없이) */
 function autoSaveConfig() {
   STATE.config.paperCapital = parseInt(document.getElementById('paper-capital').value) * 1000000 || STATE.config.paperCapital;
@@ -1205,6 +1234,7 @@ function saveConfig() {
   STATE.strategy                 = document.getElementById('strategy-select').value;
   localStorage.setItem('bot_config', JSON.stringify(STATE.config));
   localStorage.setItem('bot_strategy', STATE.strategy);
+  saveStats(); // 설정 저장 시 stats도 함께 저장
   // 카드 동기화
   document.getElementById('maxpos-display').textContent = STATE.config.maxPositions;
   renderPosSlots();
@@ -2016,6 +2046,7 @@ async function executeExit(pos, reason, netPnlPct, exitType, slippagePct) {
   STATE.recentResults.push({ win: isWin, pnlPct: netPnlPct });
   if (STATE.recentResults.length > 30) STATE.recentResults.shift(); // 최대 30회 보관
   calcAdaptiveMode(); // 10회 단위 평가
+  saveStats(); // #6 stats localStorage 저장 (Kelly 세션 간 연속성)
   return true; // ✅ 청산 완전 성공
 }
 
@@ -2700,6 +2731,28 @@ async function executeEntry(candidate) {
   addLog('buy', `   진입가 ${fmtPrice(pos.entryPrice)}원 | ${qty}주 | 투자 ${fmtPrice(qty * price)}원 [Kelly: 승률${(winRate*100).toFixed(0)}% × ×${drawdownFactor}]`);
   renderPositions();
   updateStatsUI(); // 매수 즉시 총자산 카드 반영
+
+  // #4 잔고 자동 동기화: 실전 매수 성공 → 8초 후 실제 잔고 재조회
+  if (STATE.mode === 'live' && KEYS.appKey) {
+    setTimeout(async () => {
+      if (STATE.liveBalanceFetching) return; // 이미 조회 중이면 스킵
+      STATE.liveBalanceFetching = true;
+      try {
+        const result = await getLiveBalance();
+        const bal = result?.balance ?? result ?? 0;
+        if (bal > 0) {
+          STATE.liveBalance         = bal;
+          STATE.liveBalanceKrwForUs = bal;
+          STATE.liveBalanceTs       = Date.now();
+          addLog('info', `💰 매수 후 잔고 동기화: ${fmtPrice(bal)}원`);
+          updateStatsUI();
+        }
+      } catch(e) { /* 무시 */ } finally {
+        STATE.liveBalanceFetching = false;
+        STATE.liveBalanceTs = Date.now();
+      }
+    }, 8000);
+  }
 }
 
 // ─── 실시간 포지션 가격 업데이트 ──────────────────────────────
